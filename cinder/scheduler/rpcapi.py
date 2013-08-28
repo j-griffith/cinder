@@ -80,3 +80,15 @@ class SchedulerAPI(cinder.openstack.common.rpc.proxy.RpcProxy):
         self.fanout_cast(ctxt, self.make_msg('update_service_capabilities',
                          service_name=service_name, host=host,
                          capabilities=capabilities))
+
+    def modify_type(self, ctxt, topic, volume_id,
+                    host, request_spec, filter_properties):
+        request_spec_p = jsonutils.to_primitive(request_spec)
+        return self.cast(ctxt, self.make_msg(
+            'modify_type',
+            topic=topic,
+            volume_id=volume_id,
+            host=host,
+            request_spec=request_spec_p,
+            filter_properties=filter_properties),
+            version='1.4')

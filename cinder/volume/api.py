@@ -744,6 +744,38 @@ class API(base.Base):
                                                      force_host_copy,
                                                      request_spec)
 
+    def retype(self, context, volume, type_id):
+        """Attempt to modify the type associated with an existing volume."""
+        if 'error' in volume['status']:
+            msg = _('Unable to update type due to error status on volume: %s') % volume['id']
+            LOG.warn(msg)
+            raise exception.InvalidVolume(reason=msg)
+        self.update(context, volume, {'status': 'converting-type'})
+
+        try:
+            new_type = volume_types.get_volume_type(context, type_id)
+        except exception.VolumeTypeNotFound:
+            msg = _('Inalid volume type id specified for retype: %s') % type_id
+            LOG.error(msg)
+            raise exception.InvalidInput(reason=msg)
+
+        # NOTE(jdg): For now only supporting retype w/out migration
+        # follow up later to consider expanding this
+        request_spec = {'volume_properties': volume,
+                        'volume_id': volume['id'],
+                        'volume_type': dict(new_type).iteritems()}
+
+        filter_properties = {}
+        filter_properties['size'] = 0
+        filter_properties['availability_zone'] = volume.get('availability_zone')
+        filter_properties['user_id'] = volume.get('user_id')
+        filter_properties['metadata'] = volume.get('metadata')
+        filter_properties['qos_specs'] = volume.get('qos_specs')
+
+        self.scheduler_rpcapi.modify_type(context, CONF.volume_topic,
+                                          volume['id'], volume['host'],
+                                          request_spec,
+                                          filter_properties)
 
 class HostAPI(base.Base):
     def __init__(self):

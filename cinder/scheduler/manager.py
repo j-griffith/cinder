@@ -148,3 +148,21 @@ class SchedulerManager(manager.Manager):
 
         notifier.notify(context, notifier.publisher_id("scheduler"),
                         'scheduler.' + method, notifier.ERROR, payload)
+
+    def modify_type(self, context, topic, volume_id, host,
+                    request_spec, filter_properties):
+        """Ensures current volume host supports new type."""
+        try:
+            tgt_host = self.driver.host_passes_filters(context, host,
+                                                       request_spec,
+                                                       filter_properties)
+        except exception.NoValidHost as ex:
+            # TODO(jdg): implement set_error
+            pass
+        except Exception as ex:
+            with excutils.save_and_reraise_exception():
+               # TODO(jdg): implement set_error
+               pass
+        else:
+            volume_ref = db.volume_get(context, volume_id)
+            volume_rpcapi.VolumeAPI().modify_type(context, volume_ref, tgt_host)
