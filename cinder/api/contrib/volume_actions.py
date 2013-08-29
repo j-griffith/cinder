@@ -219,6 +219,17 @@ class VolumeActionsController(wsgi.Controller):
         self.volume_api.extend(context, volume, size)
         return webob.Response(status_int=202)
 
+    @wsgi.action('os-retype')
+    def _retype(self, req, id, body):
+        """Change type of existing volume."""
+        context = req.environ['cinder.context']
+        volume = self.volume_api.get(context, id)
+        new_type = body['os-retype']['new_type']
+        self.volume_api.retype(context, volume, new_type)
+        return webob.Response(status_int=202)
+
+
+
 
 class Volume_actions(extensions.ExtensionDescriptor):
     """Enable volume actions

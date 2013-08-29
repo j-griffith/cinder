@@ -153,6 +153,7 @@ class SchedulerManager(manager.Manager):
                     request_spec, filter_properties):
         """Ensures current volume host supports new type."""
         try:
+            import pdb;pdb.set_trace()
             tgt_host = self.driver.host_passes_filters(context, host,
                                                        request_spec,
                                                        filter_properties)

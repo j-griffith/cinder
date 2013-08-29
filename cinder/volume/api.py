@@ -744,8 +744,9 @@ class API(base.Base):
                                                      force_host_copy,
                                                      request_spec)
 
-    def retype(self, context, volume, type_id):
+    def retype(self, context, id, type_id):
         """Attempt to modify the type associated with an existing volume."""
+        volume  = self.db.volume_get(context, id)
         if 'error' in volume['status']:
             msg = _('Unable to update type due to error status on volume: %s') % volume['id']
             LOG.warn(msg)
