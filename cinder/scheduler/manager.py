@@ -164,5 +164,12 @@ class SchedulerManager(manager.Manager):
                # TODO(jdg): implement set_error
                pass
         else:
+            new_type = request_spec.get('volume_type', None)
+            if new_type is None:
+                #oh dear, this shouldn't happen
+                raise exception.ImHosed()
+
             volume_ref = db.volume_get(context, volume_id)
-            volume_rpcapi.VolumeAPI().modify_type(context, volume_ref, tgt_host)
+            volume_rpcapi.VolumeAPI().modify_type(context,
+                                                  volume_ref['id'],
+                                                  new_type['id'])
