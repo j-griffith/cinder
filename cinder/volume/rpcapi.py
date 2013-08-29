@@ -173,3 +173,14 @@ class VolumeAPI(cinder.openstack.common.rpc.proxy.RpcProxy):
                                 new_name_id=new_name_id),
                   topic=rpc.queue_get_for(ctxt, self.topic, volume['host']),
                   version='1.8')
+
+    def modify_type(self, ctxt, volume_id, host, type_id):
+        host_p = {'host': host.host,
+                  'capabilities': host.capabilities}
+        self.cast(ctxt,
+                  self.make_msg('modify_type',
+                                volume_id=volume_id,
+                                type_id=type_id),
+                  topic=rpc.queue_get_for(ctxt, self.topic, host_p['host']),
+                  version='1.8')
+

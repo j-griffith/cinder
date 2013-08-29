@@ -50,7 +50,7 @@ LOG = logging.getLogger(__name__)
 class SchedulerManager(manager.Manager):
     """Chooses a host to create volumes."""
 
-    RPC_API_VERSION = '1.3'
+    RPC_API_VERSION = '1.4'
 
     def __init__(self, scheduler_driver=None, service_name=None,
                  *args, **kwargs):
@@ -153,17 +153,16 @@ class SchedulerManager(manager.Manager):
                     request_spec, filter_properties):
         """Ensures current volume host supports new type."""
         try:
-            import pdb;pdb.set_trace()
             tgt_host = self.driver.host_passes_filters(context, host,
                                                        request_spec,
                                                        filter_properties)
         except exception.NoValidHost as ex:
             # TODO(jdg): implement set_error
-            pass
+            raise
         except Exception as ex:
             with excutils.save_and_reraise_exception():
                # TODO(jdg): implement set_error
-               pass
+               raise
         else:
             new_type = request_spec.get('volume_type', None)
             if new_type is None:
@@ -173,4 +172,5 @@ class SchedulerManager(manager.Manager):
             volume_ref = db.volume_get(context, volume_id)
             volume_rpcapi.VolumeAPI().modify_type(context,
                                                   volume_ref['id'],
+                                                  tgt_host,
                                                   new_type['id'])

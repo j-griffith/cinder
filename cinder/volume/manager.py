@@ -756,3 +756,7 @@ class VolumeManager(manager.SchedulerDependentManager):
         QUOTAS.commit(context, reservations)
         self.db.volume_update(context, volume['id'], {'size': int(new_size),
                                                       'status': 'available'})
+
+
+    def modify_type(self, ctxt, volume_id, type_id):
+        pass
