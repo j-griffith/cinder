@@ -757,6 +757,94 @@ class VolumeManager(manager.SchedulerDependentManager):
         self.db.volume_update(context, volume['id'], {'size': int(new_size),
                                                       'status': 'available'})
 
+    def _check_new_type_quotas(self, context, volume, type_id):
+        # First we need to the quotas for the updated type
+        try:
+            new_type = volume_types.get_volume_type(context, type_id)
+        except exception.VolumeTypeNotFound:
+            msg = _('Invalid volume type id specified for retype: %s') % type_id
+            LOG.error(msg)
+            raise exception.InvalidInput(reason=msg)
+
+        try:
+            reserve_opts = {'volumes': 1, 'gigabytes': volume['size']}
+            QUOTAS.add_volume_type_opts(context,
+                                        reserve_opts,
+                                        type_id)
+            reservations = QUOTAS.reserve(context, **reserve_opts)
+        except exception.OverQuota as e:
+            overs = e.kwargs['overs']
+            usages = e.kwargs['usages']
+            quotas = e.kwargs['quotas']
+
+            def _consumed(name):
+                return (usages[name]['reserved'] + usages[name]['in_use'])
+
+            for over in overs:
+                if 'gigabytes' in over:
+                    msg = _("Quota exceeded for %(s_pid)s, tried to retype "
+                            "%(s_size)sG volume (%(d_consumed)dG of "
+                            "%(d_quota)dG already consumed)")
+                    LOG.warn(msg % {'s_pid': context.project_id,
+                                    's_size': volume['size'],
+                                    'd_consumed': _consumed(over),
+                                    'd_quota': quotas[over]})
+                    raise exception.VolumeSizeExceedsAvailableQuota()
+                elif 'volumes' in over:
+                    msg = _("Quota exceeded for %(s_pid)s, tried to retype "
+                            "volume (%(d_consumed)d volumes"
+                            "already consumed)")
+
+                    LOG.warn(msg % {'s_pid': context.project_id,
+                                    'd_consumed': _consumed(over)})
+                    raise exception.VolumeLimitExceeded(
+                        allowed=quotas[over])
+        return reservations
+
 
     def modify_type(self, ctxt, volume_id, type_id):
-        pass
+        context = ctxt.elevated()
+
+        volume_ref = self.db.volume_get(ctxt, volume_id)
+        if context.project_id != volume_ref['project_id']:
+            project_id = volume_ref['project_id']
+        else:
+            project_id = context.project_id
+
+        # Get old reservations
+        try:
+            reserve_opts = {'volumes': -1, 'gigabytes': -volume_ref['size']}
+            QUOTAS.add_volume_type_opts(context,
+                                        reserve_opts,
+                                        volume_ref.get('volume_type_id'))
+            old_reservations = QUOTAS.reserve(context,
+                                          project_id=project_id,
+                                          **reserve_opts)
+        except Exception:
+            old_reservations = None
+            LOG.exception(_("Failed to update usages retyping volume"))
+
+        # Now check the new reservations
+        new_reservations = self._check_new_type_quotas(context, volume_id, type_id)
+
+        try:
+            self.driver.modify_type(context, volume_ref, type_id)
+            LOG.info(_("Volume %s: retyped succesfully"), volume_ref['id'])
+        except Exception as ex:
+            LOG.exception(_("Volume %s: error tyring to retype"), volume_ref['id'])
+            try:
+                self.db.volume_update(context, volume_ref['id'],
+                                      {'status': 'error_retyping'})
+            finally:
+                QUOTAS.rollback(context, old_reservations)
+                raise exception.VolumeBackendDriverException(driver_name=self.driver.__name__)
+
+        new_type = volume_types.get_volume_type(context, type_id)
+        self.db.volume_update(context, volume_id, {'type': new_type,
+                                                   'status': 'available'})
+
+        if old_reservations:
+            QUOTAS.commit(context, old_reservations, project_id=project_id)
+        if new_reservations:
+            QUOTAS.commit(context, new_reservations, project_id=project_id)
+        self.publish_service_capabilities(context)

@@ -434,6 +434,10 @@ class VolumeDriver(object):
         """
         return None
 
+    def modify_type(self, volume, new_type_id):
+        msg = _("Retype volume not implemented")
+        raise NotImplementedError(msg)
+
 
 class ISCSIDriver(VolumeDriver):
     """Executes commands relating to ISCSI volumes.

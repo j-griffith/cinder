@@ -744,6 +744,50 @@ class API(base.Base):
                                                      force_host_copy,
                                                      request_spec)
 
+    def _check_new_type_quotas(self, context, volume, type_id):
+        # First we need to the quotas for the updated type
+        try:
+            new_type = volume_types.get_volume_type(context, type_id)
+        except exception.VolumeTypeNotFound:
+            msg = _('Invalid volume type id specified for retype: %s') % type_id
+            LOG.error(msg)
+            raise exception.InvalidInput(reason=msg)
+
+        try:
+            reserve_opts = {'volumes': 1, 'gigabytes': volume['size']}
+            QUOTAS.add_volume_type_opts(context,
+                                        reserve_opts,
+                                        type_id)
+            reservations = QUOTAS.reserve(context, **reserve_opts)
+        except exception.OverQuota as e:
+            overs = e.kwargs['overs']
+            usages = e.kwargs['usages']
+            quotas = e.kwargs['quotas']
+
+            def _consumed(name):
+                return (usages[name]['reserved'] + usages[name]['in_use'])
+
+            for over in overs:
+                if 'gigabytes' in over:
+                    msg = _("Quota exceeded for %(s_pid)s, tried to retype "
+                            "%(s_size)sG volume (%(d_consumed)dG of "
+                            "%(d_quota)dG already consumed)")
+                    LOG.warn(msg % {'s_pid': context.project_id,
+                                    's_size': volume['size'],
+                                    'd_consumed': _consumed(over),
+                                    'd_quota': quotas[over]})
+                    raise exception.VolumeSizeExceedsAvailableQuota()
+                elif 'volumes' in over:
+                    msg = _("Quota exceeded for %(s_pid)s, tried to retype "
+                            "volume (%(d_consumed)d volumes"
+                            "already consumed)")
+
+                    LOG.warn(msg % {'s_pid': context.project_id,
+                                    'd_consumed': _consumed(over)})
+                    raise exception.VolumeLimitExceeded(
+                        allowed=quotas[over])
+        return reservations
+
     def retype(self, context, volume, type_id):
         """Attempt to modify the type associated with an existing volume."""
         if 'error' in volume['status']:
@@ -755,9 +799,16 @@ class API(base.Base):
         try:
             new_type = volume_types.get_volume_type(context, type_id)
         except exception.VolumeTypeNotFound:
-            msg = _('Inalid volume type id specified for retype: %s') % type_id
+            msg = _('Invalid volume type id specified for retype: %s') % type_id
             LOG.error(msg)
             raise exception.InvalidInput(reason=msg)
+
+        # NOTE(jdg): We're checking here, but never committing
+        # reason being is there are a number of things that can go
+        # wrong in the filtering (is the current host able to support
+        # the requested type. This way we can give a quota error
+        # back if that's going to be a problem before we send the thread out
+        new_reservations = self._check_new_type_quotas(context, volume, type_id)
 
         # NOTE(jdg): For now only supporting retype w/out migration
         # follow up later to consider expanding this

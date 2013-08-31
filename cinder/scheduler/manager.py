@@ -125,11 +125,12 @@ class SchedulerManager(manager.Manager):
                                                      force_host_copy)
 
     def _set_volume_state_and_notify(self, method, updates, context, ex,
-                                     request_spec):
+                                     request_spec, mesg=None):
         # TODO(harlowja): move into a task that just does this later.
-
-        LOG.error(_("Failed to schedule_%(method)s: %(ex)s") %
-                  {'method': method, 'ex': ex})
+        if not mesg:
+            mesg = ("Failed to schedule_%(method)s: %(ex)s" %
+                    {'method': method, 'ex': ex})
+        LOG.error(_(mesg))
 
         volume_state = updates['volume_state']
         properties = request_spec.get('volume_properties', {})
@@ -152,19 +153,25 @@ class SchedulerManager(manager.Manager):
     def modify_type(self, context, topic, volume_id, host,
                     request_spec, filter_properties):
         """Ensures current volume host supports new type."""
+        new_type = request_spec.get('volume_type', None)
         try:
             tgt_host = self.driver.host_passes_filters(context, host,
                                                        request_spec,
                                                        filter_properties)
         except exception.NoValidHost as ex:
-            # TODO(jdg): implement set_error
-            raise
+            mesg = (("Selected type (%(type_id)s) is not compatable with "
+                     "volume: %(volume_id)s") %
+                    {'type_id': new_type, 'volume_id': volume_id})
+            volume_state = {'volume_state': {'status': 'invalid_retype'}}
+            self._set_volume_state_and_notify('modify_type', volume_state,
+                                              context, ex, request_spec, mesg)
         except Exception as ex:
             with excutils.save_and_reraise_exception():
-               # TODO(jdg): implement set_error
-               raise
+                volume_state = {'volume_state': {'status': 'error_retyping'}}
+                self._set_volume_state_and_notify('modify_type', volume_state,
+                                                  context, ex, request_spec)
+
         else:
-            new_type = request_spec.get('volume_type', None)
             if new_type is None:
                 #oh dear, this shouldn't happen
                 raise exception.ImHosed()
