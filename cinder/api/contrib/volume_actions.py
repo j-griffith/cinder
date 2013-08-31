@@ -229,8 +229,6 @@ class VolumeActionsController(wsgi.Controller):
         return webob.Response(status_int=202)
 
 
-
-
 class Volume_actions(extensions.ExtensionDescriptor):
     """Enable volume actions
     """

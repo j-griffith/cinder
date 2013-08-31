@@ -747,13 +747,6 @@ class API(base.Base):
     def _check_new_type_quotas(self, context, volume, type_id):
         # First we need to the quotas for the updated type
         try:
-            new_type = volume_types.get_volume_type(context, type_id)
-        except exception.VolumeTypeNotFound:
-            msg = _('Invalid volume type id specified for retype: %s') % type_id
-            LOG.error(msg)
-            raise exception.InvalidInput(reason=msg)
-
-        try:
             reserve_opts = {'volumes': 1, 'gigabytes': volume['size']}
             QUOTAS.add_volume_type_opts(context,
                                         reserve_opts,
@@ -791,7 +784,8 @@ class API(base.Base):
     def retype(self, context, volume, type_id):
         """Attempt to modify the type associated with an existing volume."""
         if 'error' in volume['status']:
-            msg = _('Unable to update type due to error status on volume: %s') % volume['id']
+            msg = _('Unable to update type due to error status '
+                    'on volume: %s') % volume['id']
             LOG.warn(msg)
             raise exception.InvalidVolume(reason=msg)
         self.update(context, volume, {'status': 'converting-type'})
@@ -799,7 +793,8 @@ class API(base.Base):
         try:
             new_type = volume_types.get_volume_type(context, type_id)
         except exception.VolumeTypeNotFound:
-            msg = _('Invalid volume type id specified for retype: %s') % type_id
+            msg = _('Invalid volume type id specified '
+                    'for retype: %s') % type_id
             LOG.error(msg)
             raise exception.InvalidInput(reason=msg)
 
@@ -808,7 +803,9 @@ class API(base.Base):
         # wrong in the filtering (is the current host able to support
         # the requested type. This way we can give a quota error
         # back if that's going to be a problem before we send the thread out
-        new_reservations = self._check_new_type_quotas(context, volume, type_id)
+        self._check_new_type_quotas(context,
+                                    volume,
+                                    type_id)
 
         # NOTE(jdg): For now only supporting retype w/out migration
         # follow up later to consider expanding this
@@ -819,7 +816,8 @@ class API(base.Base):
 
         filter_properties = {}
         filter_properties['size'] = 0
-        filter_properties['availability_zone'] = volume.get('availability_zone')
+        filter_properties['availability_zone'] =\
+            volume.get('availability_zone')
         filter_properties['user_id'] = volume.get('user_id')
         filter_properties['metadata'] = volume.get('metadata')
         filter_properties['qos_specs'] = volume.get('qos_specs')
@@ -828,6 +826,7 @@ class API(base.Base):
                                           volume['id'], volume['host'],
                                           request_spec,
                                           filter_properties)
+
 
 class HostAPI(base.Base):
     def __init__(self):

@@ -37,6 +37,8 @@ class SchedulerAPI(cinder.openstack.common.rpc.proxy.RpcProxy):
         1.2 - Add request_spec, filter_properties arguments
               to create_volume()
         1.3 - Add migrate_volume_to_host() method
+        1.4 - Add modify_type method
+
     '''
 
     RPC_API_VERSION = '1.0'

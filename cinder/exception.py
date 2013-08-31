@@ -606,8 +606,10 @@ class ProtocolNotSupported(CinderException):
 class SSHInjectionThreat(CinderException):
     message = _("SSH command injection detected") + ": %(command)s"
 
+
 class BackendDriverException(CinderException):
     message = _('Exception raised by backend driver: %(driver_name)s.')
+
 
 class CoraidException(CinderException):
     message = _('Coraid Cinder Driver exception.')

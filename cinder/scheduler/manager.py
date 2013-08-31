@@ -128,9 +128,9 @@ class SchedulerManager(manager.Manager):
                                      request_spec, mesg=None):
         # TODO(harlowja): move into a task that just does this later.
         if not mesg:
-            mesg = ("Failed to schedule_%(method)s: %(ex)s" %
+            mesg = (_("Failed to schedule_%(method)s: %(ex)s") %
                     {'method': method, 'ex': ex})
-        LOG.error(_(mesg))
+        LOG.error(mesg)
 
         volume_state = updates['volume_state']
         properties = request_spec.get('volume_properties', {})

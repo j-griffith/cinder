@@ -182,5 +182,4 @@ class VolumeAPI(cinder.openstack.common.rpc.proxy.RpcProxy):
                                 volume_id=volume_id,
                                 type_id=type_id),
                   topic=rpc.queue_get_for(ctxt, self.topic, host_p['host']),
-                  version='1.8')
-
+                  version='1.9')
