@@ -834,26 +834,6 @@ class ISCSIDriver(VolumeDriver):
         data['QoS_support'] = False
         self._stats = data
 
-    def get_target_helper(self, db):
-        root_helper = utils.get_root_helper()
-        if CONF.iscsi_helper == 'iseradm':
-            return iscsi.ISERTgtAdm(root_helper, CONF.volumes_dir,
-                                    CONF.iscsi_target_prefix, db=db)
-        elif CONF.iscsi_helper == 'tgtadm':
-            return iscsi.TgtAdm(root_helper,
-                                CONF.volumes_dir,
-                                CONF.iscsi_target_prefix,
-                                db=db)
-        elif CONF.iscsi_helper == 'fake':
-            return iscsi.FakeIscsiHelper()
-        elif CONF.iscsi_helper == 'lioadm':
-            return iscsi.LioAdm(root_helper,
-                                CONF.lio_initiator_iqns,
-                                CONF.iscsi_target_prefix, db=db)
-        else:
-            return iscsi.IetAdm(root_helper, CONF.iet_conf, CONF.iscsi_iotype,
-                                db=db)
-
 
 class FakeISCSIDriver(ISCSIDriver):
     """Logs calls instead of executing."""

@@ -25,6 +25,7 @@ import socket
 from oslo.config import cfg
 
 from cinder.brick import exception as brick_exception
+from cinder.brick.iscsi import iscsi as brick_iscsi
 from cinder.brick.local_dev import lvm as lvm
 from cinder import exception
 from cinder.image import image_utils
@@ -461,12 +462,34 @@ class LVMISCSIDriver(LVMVolumeDriver, driver.ISCSIDriver):
 
     def __init__(self, *args, **kwargs):
         self.db = kwargs.get('db')
-        self.target_helper = self.get_target_helper(self.db)
+        self.target_helper = None
         super(LVMISCSIDriver, self).__init__(*args, **kwargs)
+        self.target_helper = self.get_target_helper(self.db)
         self.backend_name =\
             self.configuration.safe_get('volume_backend_name') or 'LVM_iSCSI'
         self.protocol = 'iSCSI'
 
+    def get_target_helper(self, db):
+        root_helper = utils.get_root_helper()
+        import pdb;pdb.set_trace()
+        if self.configuration.iscsi_helper == 'iseradm':
+            return brick_iscsi.ISERTgtAdm(root_helper, self.configuration.volumes_dir,
+                                    self.configuration.iscsi_target_prefix, db=db)
+        elif self.configuration.iscsi_helper == 'tgtadm':
+            return brick_iscsi.TgtAdm(root_helper,
+                                self.configuration.volumes_dir,
+                                target_prefix=self.configuration.iscsi_target_prefix,
+                                execute=self._execute)
+
+        elif CONF.iscsi_helper == 'fake':
+            return brick_iscsi.FakeIscsiHelper()
+        elif CONF.iscsi_helper == 'lioadm':
+            return brick_iscsi.LioAdm(root_helper,
+                                CONF.lio_initiator_iqns,
+                                CONF.iscsi_target_prefix, db=db)
+        else:
+            return brick_iscsi.IetAdm(root_helper, CONF.iet_conf, CONF.iscsi_iotype,
+                                db=db)
     def set_execute(self, execute):
         super(LVMISCSIDriver, self).set_execute(execute)
         if self.target_helper is not None:
