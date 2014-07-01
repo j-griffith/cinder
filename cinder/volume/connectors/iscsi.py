@@ -16,7 +16,7 @@
 
 from oslo.config import cfg
 
-from cinder.volume.connectors import connector
+from cinder.volume.connectors import driver
 from cinder import exception
 from cinder.image import image_utils
 from cinder.openstack.common import excutils
@@ -29,7 +29,7 @@ from cinder.volume import rpcapi as volume_rpcapi
 from cinder.volume import utils as volume_utils
 
 
-class ISCSIConnector(connector.Connector):
+class ISCSIConnector(driver.Connector):
     """Connector object for block storage devices.
 
     Base class for connector object, where connector
@@ -40,6 +40,7 @@ class ISCSIConnector(connector.Connector):
 
     def __init__(self, *args, **kwargs):
         super(ISCSIConnector, self).__init__(*args, **kwargs)
+        self.protocol = 'iscsi'
 
     def _get_iscsi_properties(self, volume):
         """Gets iscsi configuration

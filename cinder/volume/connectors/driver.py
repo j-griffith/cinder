@@ -38,7 +38,7 @@ class Connector(object):
     """
 
     def __init__(*args, **kwargs):
-        raise NotImplementedError()
+        pass
 
     def ensure_export(self, volume, volume_path=None):
         raise NotImplementedError()
