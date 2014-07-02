@@ -15,6 +15,7 @@
 
 
 import os
+import time
 
 from oslo.config import cfg
 
@@ -25,12 +26,12 @@ from cinder.openstack.common import fileutils
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import processutils as putils
 from cinder import utils
-from cinder.volume.connector import iscsi
+from cinder.volume.connectors import iscsi
 
 LOG = logging.getLogger(__name__)
 
 
-class TgtAdm(iscsi.iSCSIConnector):
+class TgtAdm(iscsi.ISCSIConnector):
     """Connector object for block storage devices.
 
     Base class for connector object, where connector
@@ -54,6 +55,70 @@ class TgtAdm(iscsi.iSCSIConnector):
 
     def __init__(self, *args, **kwargs):
         super(TgtAdm, self).__init__(*args, **kwargs)
+        self.configuration = kwargs.get('configuration')
+        self.db = kwargs.get('db')
+        self.volumes_dir = self.configuration.get('volumes_dir')
+        self._execute = kwargs.get('executor')
+        self.iscsi_target_prefix = self.configuration.get('iscsi_target_prefix')
+
+    def _get_target(self, iqn):
+        (out, err) = self._execute('tgt-admin', '--show', run_as_root=True)
+        lines = out.split('\n')
+        for line in lines:
+            if iqn in line:
+                parsed = line.split()
+                tid = parsed[1]
+                return tid[:-1]
+
+        return None
+    def _verify_backing_lun(self, iqn, tid):
+        backing_lun = True
+        capture = False
+        target_info = []
+
+        (out, err) = self._execute('tgt-admin', '--show', run_as_root=True)
+        lines = out.split('\n')
+
+        for line in lines:
+            if iqn in line and "Target %s" % tid in line:
+                capture = True
+            if capture:
+                target_info.append(line)
+            if iqn not in line and 'Target ' in line:
+                capture = False
+
+        if '        LUN: 1' not in target_info:
+            backing_lun = False
+
+        return backing_lun
+
+    def _recreate_backing_lun(self, iqn, tid, name, path):
+        LOG.warning(_('Attempting recreate of backing lun...'))
+
+        # Since we think the most common case of this is a dev busy
+        # (create vol from snapshot) we're going to add a sleep here
+        # this will hopefully give things enough time to stabilize
+        # how long should we wait??  I have no idea, let's go big
+        # and error on the side of caution
+
+        time.sleep(10)
+        try:
+            (out, err) = self._execute('tgtadm', '--lld', 'iscsi',
+                                       '--op', 'new', '--mode',
+                                       'logicalunit', '--tid',
+                                       tid, '--lun', '1', '-b',
+                                       path, run_as_root=True)
+            LOG.debug('StdOut from recreate backing lun: %s' % out)
+            LOG.debug('StdErr from recreate backing lun: %s' % err)
+        except putils.ProcessExecutionError as e:
+            LOG.error(_("Failed to recover attempt to create "
+                        "iscsi backing lun for volume "
+                        "id:%(vol_id)s: %(e)s")
+                      % {'vol_id': name, 'e': e})
+
+    def _iscsi_location(self, ip, target, iqn, lun=None):
+        return "%s:%s,%s %s %s" % (ip, self.configuration.iscsi_port,
+                                   target, iqn, lun)
 
     def _create_iscsi_target(self, name, tid, lun, path,
                              chap_auth=None, **kwargs):
@@ -148,6 +213,9 @@ class TgtAdm(iscsi.iSCSIConnector):
 
         return tid
 
+    def _get_iscsi_target(self, context, vol_id):
+        return 0
+
     def ensure_export(self, volume, volume_path=None):
         chap_auth = None
         old_name = None
@@ -161,6 +229,125 @@ class TgtAdm(iscsi.iSCSIConnector):
             1, 0, volume_path,
             chap_auth, check_exit_code=False,
             old_name=old_name)
+
+    def _get_target_and_lun(self, context, volume):
+        lun = 0
+        self._ensure_iscsi_targets(context, volume['host'])
+        iscsi_target = self.db.volume_allocate_iscsi_target(context,
+                                                            volume['id'],
+                                                            volume['host'])
+        return iscsi_target, lun
+
+    def _ensure_iscsi_targets(self, context, host):
+        """Ensure that target ids have been created in datastore."""
+        # NOTE(jdg): tgtadm doesn't use the iscsi_targets table
+        # TODO(jdg): In the future move all of the dependent stuff into the
+        # cooresponding target admin class
+        host_iscsi_targets = self.db.iscsi_target_count_by_host(context,
+                                                                host)
+        if host_iscsi_targets >= self.configuration.iscsi_num_targets:
+            return
+
+        # NOTE(vish): Target ids start at 1, not 0.
+        target_end = self.configuration.iscsi_num_targets + 1
+        for target_num in xrange(1, target_end):
+            target = {'host': host, 'target_num': target_num}
+            self.db.iscsi_target_create_safe(context, target)
+
+    def create_iscsi_target(self, name, tid, lun, path,
+                            chap_auth=None, **kwargs):
+        # Note(jdg) tid and lun aren't used by TgtAdm but remain for
+        # compatibility
+
+        fileutils.ensure_tree(self.volumes_dir)
+
+        vol_id = name.split(':')[1]
+        if chap_auth is None:
+            volume_conf = self.VOLUME_CONF % (name, path)
+        else:
+            volume_conf = self.VOLUME_CONF_WITH_CHAP_AUTH % (name,
+                                                             path, chap_auth)
+
+        LOG.info(_('Creating iscsi_target for: %s') % vol_id)
+        volumes_dir = self.volumes_dir
+        volume_path = os.path.join(volumes_dir, vol_id)
+
+        f = open(volume_path, 'w+')
+        f.write(volume_conf)
+        f.close()
+        LOG.debug(_('Created volume path %(vp)s,\n'
+                    'content: %(vc)s')
+                  % {'vp': volume_path, 'vc': volume_conf})
+
+        old_persist_file = None
+        old_name = kwargs.get('old_name', None)
+        if old_name is not None:
+            old_persist_file = os.path.join(volumes_dir, old_name)
+
+        try:
+            # with the persistent tgts we create them
+            # by creating the entry in the persist file
+            # and then doing an update to get the target
+            # created.
+            (out, err) = self._execute('tgt-admin', '--update', name,
+                                       run_as_root=True)
+            LOG.debug("StdOut from tgt-admin --update: %s", out)
+            LOG.debug("StdErr from tgt-admin --update: %s", err)
+
+            # Grab targets list for debug
+            # Consider adding a check for lun 0 and 1 for tgtadm
+            # before considering this as valid
+            (out, err) = self._execute('tgtadm',
+                                       '--lld',
+                                       'iscsi',
+                                       '--op',
+                                       'show',
+                                       '--mode',
+                                       'target',
+                                       run_as_root=True)
+            LOG.debug("Targets after update: %s" % out)
+        except putils.ProcessExecutionError as e:
+            LOG.warning(_("Failed to create iscsi target for volume "
+                        "id:%(vol_id)s: %(e)s")
+                        % {'vol_id': vol_id, 'e': e})
+
+            #Don't forget to remove the persistent file we created
+            os.unlink(volume_path)
+            raise exception.ISCSITargetCreateFailed(volume_id=vol_id)
+
+        iqn = '%s%s' % (self.iscsi_target_prefix, vol_id)
+        tid = self._get_target(iqn)
+        if tid is None:
+            LOG.error(_("Failed to create iscsi target for volume "
+                        "id:%(vol_id)s. Please ensure your tgtd config file "
+                        "contains 'include %(volumes_dir)s/*'") % {
+                      'vol_id': vol_id,
+                      'volumes_dir': volumes_dir, })
+            raise exception.NotFound()
+
+        # NOTE(jdg): Sometimes we have some issues with the backing lun
+        # not being created, believe this is due to a device busy
+        # or something related, so we're going to add some code
+        # here that verifies the backing lun (lun 1) was created
+        # and we'll try and recreate it if it's not there
+        if not self._verify_backing_lun(iqn, tid):
+            try:
+                self._recreate_backing_lun(iqn, tid, name, path)
+            except putils.ProcessExecutionError:
+                os.unlink(volume_path)
+                raise exception.ISCSITargetCreateFailed(volume_id=vol_id)
+
+            # Finally check once more and if no go, fail and punt
+            if not self._verify_backing_lun(iqn, tid):
+                os.unlink(volume_path)
+                raise exception.ISCSITargetCreateFailed(volume_id=vol_id)
+
+        if old_persist_file is not None and os.path.exists(old_persist_file):
+            os.unlink(old_persist_file)
+
+        return tid
+
+
 
     def create_export(self, context, volume, volume_path):
         """Creates an export for a logical volume."""
@@ -218,8 +405,12 @@ class TgtAdm(iscsi.iSCSIConnector):
     def detach_volume(self, context, volume):
         raise NotImplementedError()
 
-    def initialize_connection(self, volume, **kwargs):
-        raise NotImplementedError()
+    def initialize_connection(self, volume, connector):
+        iscsi_properties = self._get_iscsi_properties(volume)
+        return {
+            'driver_volume_type': 'iscsi',
+            'data': iscsi_properties
+        }
 
     def terminate_connection(volume, **kwargs):
         raise NotImplementedError()

@@ -456,7 +456,9 @@ class LVMVolumeDriver(driver.VolumeDriver):
             self.db.volume_update(context, volume['id'], model_update)
 
     def create_export(self, context, volume):
-        return self.connector.create_export(context, volume)
+        volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
+                                      volume['name'])
+        return self.connector.create_export(context, volume, volume_path)
 
     def remove_export(self, context, volume):
         self.connector.remove_export(context, volume)
@@ -467,8 +469,8 @@ class LVMVolumeDriver(driver.VolumeDriver):
     def detach_volume(self, context, volume):
         self.connector.attach(context, volume)
 
-    def initalize_connection(self, volume, **kwargs):
-        self.connector.initialize_connection(volume, **kwargs)
+    def initialize_connection(self, volume, connector):
+        self.connector.initialize_connection(volume, connector)
 
     def terminate_connection(self, volume, connector, **kwargs):
         self.connector.terminate_connection(volume, **kwargs)

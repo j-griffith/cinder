@@ -37,7 +37,7 @@ LOG = logging.getLogger(__name__)
 
 volume_opts = [
     cfg.StrOpt('volume_connector',
-                   default='cinder.volume.connectors.iscsi.ISCSIConnector',
+                   default='cinder.volume.connectors.tgt.TgtAdm',
                    help='Driver to use for volume connector'),
     cfg.IntOpt('num_shell_tries',
                default=3,
@@ -151,7 +151,9 @@ class VolumeDriver(object):
 
         self.connector = importutils.import_object(
             self.configuration.get('volume_connector'),
-            configuration=self.configuration)
+            configuration=self.configuration,
+            db=self.db,
+            executor=execute)
 
         self.set_execute(execute)
         self._stats = {}

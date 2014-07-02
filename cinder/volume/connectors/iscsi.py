@@ -41,6 +41,10 @@ class ISCSIConnector(driver.Connector):
     def __init__(self, *args, **kwargs):
         super(ISCSIConnector, self).__init__(*args, **kwargs)
         self.protocol = 'iscsi'
+        self.configuration = kwargs.get('configuration')
+        self.db = kwargs.get('db')
+        self.volumes_dir = self.configuration.get('volumes_dir')
+        self._execute = kwargs.get('executor')
 
     def _get_iscsi_properties(self, volume):
         """Gets iscsi configuration
@@ -121,6 +125,9 @@ class ISCSIConnector(driver.Connector):
         properties['encrypted'] = encryption_key_id is not None
 
         return properties
+
+    def _iscsi_authentication(self, chap, name, password):
+        return "%s %s %s" % (chap, name, password)
 
     def ensure_export(self, volume, volume_path=None):
         raise NotImplementedError()
