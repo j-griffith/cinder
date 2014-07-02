@@ -28,6 +28,7 @@ from cinder.volume import iscsi
 from cinder.volume import rpcapi as volume_rpcapi
 from cinder.volume import utils as volume_utils
 
+LOG = logging.getLogger(__name__)
 
 class ISCSIConnector(driver.Connector):
     """Connector object for block storage devices.
@@ -128,6 +129,33 @@ class ISCSIConnector(driver.Connector):
 
     def _iscsi_authentication(self, chap, name, password):
         return "%s %s %s" % (chap, name, password)
+
+    def _do_iscsi_discovery(self, volume):
+        #TODO(justinsb): Deprecate discovery and use stored info
+        #NOTE(justinsb): Discovery won't work with CHAP-secured targets (?)
+        LOG.warn(_("ISCSI provider_location not stored, using discovery"))
+
+        volume_name = volume['name']
+
+        try:
+            # NOTE(griff) We're doing the split straight away which should be
+            # safe since using '@' in hostname is considered invalid
+
+            (out, _err) = self._execute('iscsiadm', '-m', 'discovery',
+                                        '-t', 'sendtargets', '-p',
+                                        volume['host'].split('@')[0],
+                                        run_as_root=True)
+        except processutils.ProcessExecutionError as ex:
+            LOG.error(_("ISCSI discovery attempt failed for:%s") %
+                      volume['host'].split('@')[0])
+            LOG.debug(_("Error from iscsiadm -m discovery: %s") % ex.stderr)
+            return None
+
+        for target in out.splitlines():
+            if (self.configuration.iscsi_ip_address in target
+                    and volume_name in target):
+                return target
+        return None
 
     def ensure_export(self, volume, volume_path=None):
         raise NotImplementedError()
