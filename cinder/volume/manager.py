@@ -831,6 +831,9 @@ class VolumeManager(manager.SchedulerDependentManager):
                                                          force=force)
             # NOTE(skolathur): If volume_type is fibre_channel, invoke
             # FCZoneManager to remove access control via FC zoning.
+
+            # FIXME(jdg): These FC-ZM hacks need to be moved out of here
+            # and down in to the connector
             if conn_info:
                 vol_type = conn_info.get('driver_volume_type', None)
                 mode = self.configuration.zoning_mode
@@ -1292,6 +1295,10 @@ class VolumeManager(manager.SchedulerDependentManager):
         params zone_op: Indicates if it is a zone add or delete operation
         zone_op=0 for delete connection and 1 for add connection
         """
+
+        # FIXME(jdg):  Needs to be moved out of manager and
+        # abstracted in to a connector object
+
         _initiator_target_map = None
         if 'initiator_target_map' in conn_info['data']:
             _initiator_target_map = conn_info['data']['initiator_target_map']

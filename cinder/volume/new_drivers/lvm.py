@@ -469,7 +469,7 @@ class LVMVolumeDriver(driver.VolumeDriver):
         return self.connector.initialize_connection(volume, connector)
 
     def terminate_connection(self, volume, connector, **kwargs):
-        self.connector.terminate_connection(volume, **kwargs)
+        pass
 
 
     # FIXME(jdg): this is all hosed, need to fix
