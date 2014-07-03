@@ -26,7 +26,6 @@ from cinder import exception
 from cinder.image import image_utils
 from cinder.openstack.common import excutils
 from cinder.openstack.common import fileutils
-from cinder.openstack.common import importutils
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import processutils
 from cinder import utils
@@ -137,7 +136,30 @@ CONF.register_opts(iser_opts)
 
 
 class VolumeDriver(object):
-    """Executes commands relating to Volumes."""
+    """Executes commands relating to Volumes.
+
+       Base Driver for Cinder Volume Control Path,
+       This includes supported/required implementation
+       for API calls.  Also provides *generic* implementation
+       of core features like cloning, copy_image_to_volume etc,
+       this way drivers that inherit from this base class and
+       don't offer their own impl can fall back on a general
+       solution here.
+
+       Key thing to keep in mind with this driver is that it's
+       intended that these drivers ONLY implement Control Path
+       details (create, delete, extend...), while transport or
+       data path related implementation should be a *member object*
+       that we call a connector.  The point here is that for example
+       don't allow the LVM driver to implement iSCSI methods, instead
+       call whatever connector it has configued via conf file (iSCSI{LIO, TGT, IET},
+       FC, etc).
+
+       In the base class and for example the LVM driver we do this via a has-a
+       relationship and just provide an interface to the specific connector
+       methods.  How you do this in your own driver is of course up to you.
+
+    """
 
     VERSION = "N/A"
 
@@ -146,34 +168,15 @@ class VolumeDriver(object):
         self.db = kwargs.get('db')
         self.host = kwargs.get('host')
         self.configuration = kwargs.get('configuration', None)
+
         if self.configuration:
             self.configuration.append_config_values(volume_opts)
-
-        self.connector = importutils.import_object(
-            self.configuration.get('volume_connector'),
-            configuration=self.configuration,
-            db=self.db,
-            executor=execute)
 
         self.set_execute(execute)
         self._stats = {}
 
         # set True by manager after successful check_for_setup
         self._initialized = False
-
-    def set_execute(self, execute):
-        self._execute = execute
-
-    def set_initialized(self):
-        self._initialized = True
-
-    @property
-    def initialized(self):
-        return self._initialized
-
-    def get_version(self):
-        """Get the current version of this driver."""
-        return self.VERSION
 
     def _is_non_recoverable(self, err, non_recoverable_list):
         for item in non_recoverable_list:
@@ -204,6 +207,56 @@ class VolumeDriver(object):
                 LOG.exception(_("Recovering from a failed execute.  "
                                 "Try number %s"), tries)
                 time.sleep(tries ** 2)
+
+    def _detach_volume(self, context, attach_info, volume, properties,
+                       force=False, remote=False):
+        """Disconnect the volume from the host."""
+        # Use Brick's code to do attach/detach
+        connector = attach_info['connector']
+        connector.disconnect_volume(attach_info['conn']['data'],
+                                    attach_info['device'])
+
+        if remote:
+            # Call remote manager's terminate_connection which includes
+            # driver's terminate_connection and remove export
+            rpcapi = volume_rpcapi.VolumeAPI()
+            rpcapi.terminate_connection(context, volume, properties,
+                                        force=force)
+        else:
+            # Call local driver's terminate_connection and remove export.
+            # NOTE(avishay) This is copied from the manager's code - need to
+            # clean this up in the future.
+            try:
+                self.terminate_connection(volume, properties, force=force)
+            except Exception as err:
+                err_msg = (_('Unable to terminate volume connection: %(err)s')
+                           % {'err': err})
+                LOG.error(err_msg)
+                raise exception.VolumeBackendAPIException(data=err_msg)
+
+            try:
+                LOG.debug(_("volume %s: removing export"), volume['id'])
+                self.remove_export(context, volume)
+            except Exception as ex:
+                LOG.exception(_("Error detaching volume %(volume)s, "
+                                "due to remove export failure."),
+                              {"volume": volume['id']})
+                raise exception.RemoveExportException(volume=volume['id'],
+                                                      reason=ex)
+
+    def set_execute(self, execute):
+        self._execute = execute
+
+    def set_initialized(self):
+        self._initialized = True
+
+    @property
+    def initialized(self):
+        return self._initialized
+
+    def get_version(self):
+        """Get the current version of this driver."""
+        return self.VERSION
 
     def check_for_setup_error(self):
         raise NotImplementedError()
@@ -237,54 +290,11 @@ class VolumeDriver(object):
     def local_path(self, volume):
         raise NotImplementedError()
 
-    def ensure_export(self, context, volume):
-        """Synchronously recreates an export for a volume."""
-        raise NotImplementedError()
-
-    def create_export(self, context, volume):
-        """Exports the volume. Can optionally return a Dictionary of changes
-        to the volume object to be persisted.
-        """
-        raise NotImplementedError()
-
-    def remove_export(self, context, volume):
-        """Removes an export for a volume."""
-        raise NotImplementedError()
-
-    def initialize_connection(self, volume, connector):
-        """Allow connection to connector and return connection info."""
-        raise NotImplementedError()
-
-    def terminate_connection(self, volume, connector, **kwargs):
-        """Disallow connection from connector"""
-        raise NotImplementedError()
-
-    def attach_volume(self, context, volume, instance_uuid, host_name,
-                      mountpoint):
-        """Callback for volume attached to instance or host."""
-        pass
-
-    def detach_volume(self, context, volume):
-        """Callback for volume detached."""
-        pass
-
     def get_volume_stats(self, refresh=False):
         """Return the current state of the volume service. If 'refresh' is
            True, run the update first.
         """
         return None
-
-    def do_setup(self, context):
-        """Any initialization the volume driver does while starting."""
-        pass
-
-    def validate_connector(self, connector):
-        """Fail if connector doesn't contain all the data needed by driver."""
-        pass
-
-    @staticmethod
-    def validate_connector_has_setting(connector, setting):
-        pass
 
     def copy_volume_data(self, context, src_vol, dest_vol, remote=None):
         """Copy data from src_vol to dest_vol."""
@@ -439,42 +449,6 @@ class VolumeDriver(object):
                                                       {'path': host_device}))
         return {'conn': conn, 'device': device, 'connector': connector}
 
-    def _detach_volume(self, context, attach_info, volume, properties,
-                       force=False, remote=False):
-        """Disconnect the volume from the host."""
-        # Use Brick's code to do attach/detach
-        connector = attach_info['connector']
-        connector.disconnect_volume(attach_info['conn']['data'],
-                                    attach_info['device'])
-
-        if remote:
-            # Call remote manager's terminate_connection which includes
-            # driver's terminate_connection and remove export
-            rpcapi = volume_rpcapi.VolumeAPI()
-            rpcapi.terminate_connection(context, volume, properties,
-                                        force=force)
-        else:
-            # Call local driver's terminate_connection and remove export.
-            # NOTE(avishay) This is copied from the manager's code - need to
-            # clean this up in the future.
-            try:
-                self.terminate_connection(volume, properties, force=force)
-            except Exception as err:
-                err_msg = (_('Unable to terminate volume connection: %(err)s')
-                           % {'err': err})
-                LOG.error(err_msg)
-                raise exception.VolumeBackendAPIException(data=err_msg)
-
-            try:
-                LOG.debug(_("volume %s: removing export"), volume['id'])
-                self.remove_export(context, volume)
-            except Exception as ex:
-                LOG.exception(_("Error detaching volume %(volume)s, "
-                                "due to remove export failure."),
-                              {"volume": volume['id']})
-                raise exception.RemoveExportException(volume=volume['id'],
-                                                      reason=ex)
-
     def clone_image(self, volume, image_location, image_id, image_meta):
         """Create a volume efficiently from an existing image.
 
@@ -625,3 +599,50 @@ class VolumeDriver(object):
         backend storage object.
         """
         pass
+
+    def attach_volume(self, context, volume, instance_uuid, host_name,
+                      mountpoint):
+        """Callback for volume attached to instance or host."""
+        pass
+
+    def detach_volume(self, context, volume):
+        """Callback for volume detached."""
+        pass
+
+    def do_setup(self, context):
+        """Any initialization the volume driver does while starting."""
+        pass
+
+    def validate_connector(self, connector):
+        """Fail if connector doesn't contain all the data needed by driver."""
+        pass
+
+    @staticmethod
+    def validate_connector_has_setting(connector, setting):
+        pass
+
+
+    ########  Interface methods for DataPath (Connector) ########
+
+    def ensure_export(self, context, volume):
+        """Synchronously recreates an export for a volume."""
+        raise NotImplementedError()
+
+    def create_export(self, context, volume):
+        """Exports the volume. Can optionally return a Dictionary of changes
+        to the volume object to be persisted.
+        """
+        raise NotImplementedError()
+
+    def remove_export(self, context, volume):
+        """Removes an export for a volume."""
+        raise NotImplementedError()
+
+    def initialize_connection(self, volume, connector):
+        """Allow connection to connector and return connection info."""
+        raise NotImplementedError()
+
+    def terminate_connection(self, volume, connector, **kwargs):
+        """Disallow connection from connector"""
+        raise NotImplementedError()
+

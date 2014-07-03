@@ -234,7 +234,7 @@ class VolumeManager(manager.SchedulerDependentManager):
                     sum += volume['size']
                     self.stats['allocated_capacity_gb'] = sum
                     try:
-                        self.driver.ensure_export(ctxt, volume)
+                        model_update = self.driver.ensure_export(ctxt, volume)
                     except Exception as export_ex:
                         LOG.error(_("Failed to re-export volume %s: "
                                     "setting to error state"), volume['id'])
@@ -242,6 +242,9 @@ class VolumeManager(manager.SchedulerDependentManager):
                         self.db.volume_update(ctxt,
                                               volume['id'],
                                               {'status': 'error'})
+                    if model_update:
+                        self.db.volume_update(context, volume['id'], model_update)
+
                 elif volume['status'] == 'downloading':
                     LOG.info(_("volume %s stuck in a downloading state"),
                              volume['id'])

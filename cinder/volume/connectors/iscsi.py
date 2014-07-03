@@ -14,19 +14,10 @@
 #    under the License.
 
 
-from oslo.config import cfg
-
 from cinder.volume.connectors import driver
 from cinder import exception
-from cinder.image import image_utils
-from cinder.openstack.common import excutils
-from cinder.openstack.common import fileutils
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import processutils
-from cinder import utils
-from cinder.volume import iscsi
-from cinder.volume import rpcapi as volume_rpcapi
-from cinder.volume import utils as volume_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -41,11 +32,9 @@ class ISCSIConnector(driver.Connector):
 
     def __init__(self, *args, **kwargs):
         super(ISCSIConnector, self).__init__(*args, **kwargs)
+        self.iscsi_target_prefix = \
+            self.configuration.get('iscsi_target_prefix')
         self.protocol = 'iscsi'
-        self.configuration = kwargs.get('configuration')
-        self.db = kwargs.get('db')
-        self.volumes_dir = self.configuration.get('volumes_dir')
-        self._execute = kwargs.get('executor')
 
     def _get_iscsi_properties(self, volume):
         """Gets iscsi configuration
@@ -157,23 +146,6 @@ class ISCSIConnector(driver.Connector):
                 return target
         return None
 
-    def ensure_export(self, volume, volume_path=None):
-        raise NotImplementedError()
-
-    def create_export(self, context, volume):
-        raise NotImplementedError()
-
-    def remove_export(self, context, volume):
-        raise NotImplementedError()
-
-    def attach_volume(self, context,
-                      volume, instance_uuid,
-                      host_name, mountpoint):
-        raise NotImplementedError()
-
-    def terminate_connection(volume, **kwargs):
-        raise NotImplementedError()
-
     def detach_volume(self, context, volume):
         self._init_connection_properties(volume)
         iscsi_properties = self._get_iscsi_properties(volume)
@@ -207,6 +179,6 @@ class ISCSIConnector(driver.Connector):
         }
 
     def validate_connector(self):
-        # BOOKMARK:  api passes in connector which is initiator info
+        # NOTE(jdg): api passes in connector which is initiator info
         # consider renaming this stuff from connector --> transport | target
         pass

@@ -17,11 +17,7 @@
 import os
 import time
 
-from oslo.config import cfg
-
 from cinder import exception
-from cinder.image import image_utils
-from cinder.openstack.common import excutils
 from cinder.openstack.common import fileutils
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import processutils as putils
@@ -55,11 +51,7 @@ class TgtAdm(iscsi.ISCSIConnector):
 
     def __init__(self, *args, **kwargs):
         super(TgtAdm, self).__init__(*args, **kwargs)
-        self.configuration = kwargs.get('configuration')
-        self.db = kwargs.get('db')
         self.volumes_dir = self.configuration.get('volumes_dir')
-        self._execute = kwargs.get('executor')
-        self.iscsi_target_prefix = self.configuration.get('iscsi_target_prefix')
 
     def _get_target(self, iqn):
         (out, err) = self._execute('tgt-admin', '--show', run_as_root=True)
@@ -101,7 +93,6 @@ class TgtAdm(iscsi.ISCSIConnector):
         # this will hopefully give things enough time to stabilize
         # how long should we wait??  I have no idea, let's go big
         # and error on the side of caution
-
         time.sleep(10)
         try:
             (out, err) = self._execute('tgtadm', '--lld', 'iscsi',
@@ -124,24 +115,9 @@ class TgtAdm(iscsi.ISCSIConnector):
     def _get_iscsi_target(self, context, vol_id):
         return 0
 
-    def ensure_export(self, volume, volume_path=None):
-        chap_auth = None
-        old_name = None
-
-        # FIXME (jdg): This appears to be broken in existing code
-        # we recreate the iscsi target but we pass in None
-        # for CHAP, so we just recreated without CHAP even if
-        # we had it set on initial create
-        self.create_iscsi_target(
-            self.configuration.get('iscsi_target_prefix'),
-            1, 0, volume_path,
-            chap_auth, check_exit_code=False,
-            old_name=old_name)
-
     def _get_target_and_lun(self, context, volume):
         lun = 1  # For tgtadm the controller is lun 0, dev starts at lun 1
         iscsi_target = 0  # NOTE(jdg): Not used by tgtadm
-        return iscsi_target, lun
         return iscsi_target, lun
 
     def _ensure_iscsi_targets(self, context, host):
@@ -160,11 +136,24 @@ class TgtAdm(iscsi.ISCSIConnector):
             target = {'host': host, 'target_num': target_num}
             self.db.iscsi_target_create_safe(context, target)
 
+    def ensure_export(self, volume, volume_path=None):
+        chap_auth = None
+        old_name = None
+
+        # FIXME (jdg): This appears to be broken in existing code
+        # we recreate the iscsi target but we pass in None
+        # for CHAP, so we just recreated without CHAP even if
+        # we had it set on initial create
+        self.create_iscsi_target(
+            self.configuration.get('iscsi_target_prefix'),
+            1, 0, volume_path,
+            chap_auth, check_exit_code=False,
+            old_name=old_name)
+
     def create_iscsi_target(self, name, tid, lun, path,
                             chap_auth=None, **kwargs):
         # Note(jdg) tid and lun aren't used by TgtAdm but remain for
         # compatibility
-
         fileutils.ensure_tree(self.volumes_dir)
 
         vol_id = name.split(':')[1]
@@ -253,8 +242,6 @@ class TgtAdm(iscsi.ISCSIConnector):
 
         return tid
 
-
-
     def create_export(self, context, volume, volume_path):
         """Creates an export for a logical volume."""
         iscsi_name = "%s%s" % (self.configuration.iscsi_target_prefix,
@@ -303,23 +290,12 @@ class TgtAdm(iscsi.ISCSIConnector):
 
         self.remove_iscsi_target(iscsi_target, 0, volume['id'], volume['name'])
 
-    def attach_volume(self, context,
-                      volume, instance_uuid,
-                      host_name, mountpoint):
-        raise NotImplementedError()
-
-    def detach_volume(self, context, volume):
-        raise NotImplementedError()
-
     def initialize_connection(self, volume, connector):
         iscsi_properties = self._get_iscsi_properties(volume)
         return {
             'driver_volume_type': 'iscsi',
             'data': iscsi_properties
         }
-
-    def terminate_connection(volume, **kwargs):
-        raise NotImplementedError()
 
     def remove_iscsi_target(self, tid, lun, vol_id, vol_name, **kwargs):
         LOG.info(_('Removing iscsi_target for: %s') % vol_id)

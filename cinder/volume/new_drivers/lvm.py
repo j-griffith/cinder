@@ -29,6 +29,7 @@ from cinder.brick.local_dev import lvm as lvm
 from cinder import exception
 from cinder.image import image_utils
 from cinder.openstack.common import fileutils
+from cinder.openstack.common import importutils
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import processutils
 from cinder import units
@@ -61,57 +62,26 @@ class LVMVolumeDriver(driver.VolumeDriver):
     VERSION = '3.0.0'
 
     def __init__(self, vg_obj=None, *args, **kwargs):
+        # Parent sets db, host, _execute and base config
         super(LVMVolumeDriver, self).__init__(*args, **kwargs)
+
         self.configuration.append_config_values(volume_opts)
         self.hostname = socket.gethostname()
         self.vg = vg_obj
         self.backend_name =\
             self.configuration.safe_get('volume_backend_name') or 'LVM'
+
+        # Connector is what handles data-transport
+        # Transport specific code should NOT be in
+        # the driver (control path), this way
+        # different connectors can be added (iscsi, FC etc)
+        self.connector = importutils.import_object(
+            self.configuration.get('volume_connector'),
+            configuration=self.configuration,
+            db=self.db,
+            executor=self._execute)
+
         self.protocol = self.connector.protocol
-
-    def set_execute(self, execute):
-        self._execute = execute
-
-    def check_for_setup_error(self):
-        """Verify that requirements are in place to use LVM driver."""
-        if self.vg is None:
-            root_helper = utils.get_root_helper()
-            try:
-                self.vg = lvm.LVM(self.configuration.volume_group,
-                                  root_helper,
-                                  lvm_type=self.configuration.lvm_type,
-                                  executor=self._execute)
-            except brick_exception.VolumeGroupNotFound:
-                message = ("Volume Group %s does not exist" %
-                           self.configuration.volume_group)
-                raise exception.VolumeBackendAPIException(data=message)
-
-        vg_list = volutils.get_all_volume_groups(
-            self.configuration.volume_group)
-        vg_dict = \
-            (vg for vg in vg_list if vg['name'] == self.vg.vg_name).next()
-        if vg_dict is None:
-            message = ("Volume Group %s does not exist" %
-                       self.configuration.volume_group)
-            raise exception.VolumeBackendAPIException(data=message)
-
-        if self.configuration.lvm_type == 'thin':
-            # Specific checks for using Thin provisioned LV's
-            if not volutils.supports_thin_provisioning():
-                message = ("Thin provisioning not supported "
-                           "on this version of LVM.")
-                raise exception.VolumeBackendAPIException(data=message)
-
-            pool_name = "%s-pool" % self.configuration.volume_group
-            if self.vg.get_volume(pool_name) is None:
-                try:
-                    self.vg.create_thin_pool(pool_name)
-                except processutils.ProcessExecutionError as exc:
-                    exception_message = ("Failed to create thin pool, "
-                                         "error message was: %s"
-                                         % exc.stderr)
-                    raise exception.VolumeBackendAPIException(
-                        data=exception_message)
 
     def _sizestr(self, size_in_g):
         if int(size_in_g) == 0:
@@ -183,6 +153,90 @@ class LVMVolumeDriver(driver.VolumeDriver):
             vg_ref = vg
 
         vg_ref.create_volume(name, size, lvm_type, mirror_count)
+
+    def _update_volume_stats(self):
+        """Retrieve stats info from volume group."""
+
+        LOG.debug(_("Updating volume stats"))
+        if self.vg is None:
+            LOG.warning(_('Unable to update stats on non-initialized '
+                          'Volume Group: %s'), self.configuration.volume_group)
+            return
+
+        self.vg.update_volume_group_info()
+        data = {}
+
+        # Note(zhiteng): These information are driver/backend specific,
+        # each driver may define these values in its own config options
+        # or fetch from driver specific configuration file.
+        data["volume_backend_name"] = self.backend_name
+        data["vendor_name"] = 'Open Source'
+        data["driver_version"] = self.VERSION
+        data["storage_protocol"] = self.protocol
+
+        if self.configuration.lvm_mirrors > 0:
+            data['total_capacity_gb'] =\
+                self.vg.vg_mirror_size(self.configuration.lvm_mirrors)
+            data['free_capacity_gb'] =\
+                self.vg.vg_mirror_free_space(self.configuration.lvm_mirrors)
+        elif self.configuration.lvm_type == 'thin':
+            data['total_capacity_gb'] = self.vg.vg_thin_pool_size
+            data['free_capacity_gb'] = self.vg.vg_thin_pool_free_space
+        else:
+            data['total_capacity_gb'] = self.vg.vg_size
+            data['free_capacity_gb'] = self.vg.vg_free_space
+        data['reserved_percentage'] = self.configuration.reserved_percentage
+        data['QoS_support'] = False
+        data['location_info'] =\
+            ('LVMVolumeDriver:%(hostname)s:%(vg)s'
+             ':%(lvm_type)s:%(lvm_mirrors)s' %
+             {'hostname': self.hostname,
+              'vg': self.configuration.volume_group,
+              'lvm_type': self.configuration.lvm_type,
+              'lvm_mirrors': self.configuration.lvm_mirrors})
+
+        self._stats = data
+
+    def check_for_setup_error(self):
+        """Verify that requirements are in place to use LVM driver."""
+        if self.vg is None:
+            root_helper = utils.get_root_helper()
+            try:
+                self.vg = lvm.LVM(self.configuration.volume_group,
+                                  root_helper,
+                                  lvm_type=self.configuration.lvm_type,
+                                  executor=self._execute)
+            except brick_exception.VolumeGroupNotFound:
+                message = ("Volume Group %s does not exist" %
+                           self.configuration.volume_group)
+                raise exception.VolumeBackendAPIException(data=message)
+
+        vg_list = volutils.get_all_volume_groups(
+            self.configuration.volume_group)
+        vg_dict = \
+            (vg for vg in vg_list if vg['name'] == self.vg.vg_name).next()
+        if vg_dict is None:
+            message = ("Volume Group %s does not exist" %
+                       self.configuration.volume_group)
+            raise exception.VolumeBackendAPIException(data=message)
+
+        if self.configuration.lvm_type == 'thin':
+            # Specific checks for using Thin provisioned LV's
+            if not volutils.supports_thin_provisioning():
+                message = ("Thin provisioning not supported "
+                           "on this version of LVM.")
+                raise exception.VolumeBackendAPIException(data=message)
+
+            pool_name = "%s-pool" % self.configuration.volume_group
+            if self.vg.get_volume(pool_name) is None:
+                try:
+                    self.vg.create_thin_pool(pool_name)
+                except processutils.ProcessExecutionError as exc:
+                    exception_message = ("Failed to create thin pool, "
+                                         "error message was: %s"
+                                         % exc.stderr)
+                    raise exception.VolumeBackendAPIException(
+                        data=exception_message)
 
     def create_volume(self, volume):
         """Creates a logical volume."""
@@ -339,49 +393,6 @@ class LVMVolumeDriver(driver.VolumeDriver):
 
         return self._stats
 
-    def _update_volume_stats(self):
-        """Retrieve stats info from volume group."""
-
-        LOG.debug(_("Updating volume stats"))
-        if self.vg is None:
-            LOG.warning(_('Unable to update stats on non-initialized '
-                          'Volume Group: %s'), self.configuration.volume_group)
-            return
-
-        self.vg.update_volume_group_info()
-        data = {}
-
-        # Note(zhiteng): These information are driver/backend specific,
-        # each driver may define these values in its own config options
-        # or fetch from driver specific configuration file.
-        data["volume_backend_name"] = self.backend_name
-        data["vendor_name"] = 'Open Source'
-        data["driver_version"] = self.VERSION
-        data["storage_protocol"] = self.protocol
-
-        if self.configuration.lvm_mirrors > 0:
-            data['total_capacity_gb'] =\
-                self.vg.vg_mirror_size(self.configuration.lvm_mirrors)
-            data['free_capacity_gb'] =\
-                self.vg.vg_mirror_free_space(self.configuration.lvm_mirrors)
-        elif self.configuration.lvm_type == 'thin':
-            data['total_capacity_gb'] = self.vg.vg_thin_pool_size
-            data['free_capacity_gb'] = self.vg.vg_thin_pool_free_space
-        else:
-            data['total_capacity_gb'] = self.vg.vg_size
-            data['free_capacity_gb'] = self.vg.vg_free_space
-        data['reserved_percentage'] = self.configuration.reserved_percentage
-        data['QoS_support'] = False
-        data['location_info'] =\
-            ('LVMVolumeDriver:%(hostname)s:%(vg)s'
-             ':%(lvm_type)s:%(lvm_mirrors)s' %
-             {'hostname': self.hostname,
-              'vg': self.configuration.volume_group,
-              'lvm_type': self.configuration.lvm_type,
-              'lvm_mirrors': self.configuration.lvm_mirrors})
-
-        self._stats = data
-
     def extend_volume(self, volume, new_size):
         """Extend an existing volume's size."""
         self.vg.extend_volume(volume['name'],
@@ -442,37 +453,6 @@ class LVMVolumeDriver(driver.VolumeDriver):
                 data=exception_message)
         return lv_size
 
-    def ensure_export(self, context, volume):
-        volume_name = volume['name']
-        iscsi_name = "%s%s" % (self.configuration.iscsi_target_prefix,
-                               volume_name)
-        volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
-                                      volume_name)
-        model_update = self.connector.ensure_export(context,
-                                                    volume,
-                                                    volume_path=volume_path)
-        # TODO(jdg): move db call up to manager
-        if model_update:
-            self.db.volume_update(context, volume['id'], model_update)
-
-    def create_export(self, context, volume):
-        volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
-                                      volume['name'])
-        export_info = self.connector.create_export(context, volume, volume_path)
-        return {'provider_location': export_info['location'],
-                'provider_auth': export_info['auth'],}
-
-    def remove_export(self, context, volume):
-        self.connector.remove_export(context, volume)
-
-    def initialize_connection(self, volume, connector):
-        return self.connector.initialize_connection(volume, connector)
-
-    def terminate_connection(self, volume, connector, **kwargs):
-        pass
-
-
-    # FIXME(jdg): this is all hosed, need to fix
     def migrate_volume(self, ctxt, volume, host, thin=False, mirror_count=0):
         """Optimize the migration if the destination is on the same server.
 
@@ -523,6 +503,35 @@ class LVMVolumeDriver(driver.VolumeDriver):
                              self.configuration.volume_dd_blocksize,
                              execute=self._execute)
         self._delete_volume(volume)
-        ###jdg fixme model_update = self.create_export(ctxt, volume, vg=dest_vg)
 
+        model_update = self.create_export(ctxt, volume)
         return (True, model_update)
+
+    ########  Interface methods for DataPath (Connector) ########
+
+    def ensure_export(self, context, volume):
+        volume_name = volume['name']
+        volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
+                                      volume_name)
+        model_update = self.connector.ensure_export(context,
+                                                    volume,
+                                                    volume_path=volume_path)
+        return model_update
+
+    def create_export(self, context, volume):
+        volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
+                                      volume['name'])
+        export_info = self.connector.create_export(context,
+                                                   volume,
+                                                   volume_path)
+        return {'provider_location': export_info['location'],
+                'provider_auth': export_info['auth'], }
+
+    def remove_export(self, context, volume):
+        self.connector.remove_export(context, volume)
+
+    def initialize_connection(self, volume, connector):
+        return self.connector.initialize_connection(volume, connector)
+
+    def terminate_connection(self, volume, connector, **kwargs):
+        pass

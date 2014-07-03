@@ -14,20 +14,6 @@
 #    under the License.
 
 
-from oslo.config import cfg
-
-from cinder import exception
-from cinder.image import image_utils
-from cinder.openstack.common import excutils
-from cinder.openstack.common import fileutils
-from cinder.openstack.common import log as logging
-from cinder.openstack.common import processutils
-from cinder import utils
-from cinder.volume import iscsi
-from cinder.volume import rpcapi as volume_rpcapi
-from cinder.volume import utils as volume_utils
-
-
 class Connector(object):
     """Connector object for block storage devices.
 
@@ -35,10 +21,16 @@ class Connector(object):
     is data transport mechanism specific calls.  This
     includes things like create targets, attach, detach
     etc.
+
+    Base class here does nothing more than set an executor and db as
+    well as force implementation of required methods.
+
     """
 
-    def __init__(*args, **kwargs):
-        pass
+    def __init__(self, *args, **kwargs):
+        self.db = kwargs.get('db')
+        self.configuration = kwargs.safe_get('configuration')
+        self._execute = kwargs.safe_get('executor')
 
     def ensure_export(self, volume, volume_path=None):
         raise NotImplementedError()
