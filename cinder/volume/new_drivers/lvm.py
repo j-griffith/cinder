@@ -458,19 +458,15 @@ class LVMVolumeDriver(driver.VolumeDriver):
     def create_export(self, context, volume):
         volume_path = "/dev/%s/%s" % (self.configuration.volume_group,
                                       volume['name'])
-        return self.connector.create_export(context, volume, volume_path)
+        export_info = self.connector.create_export(context, volume, volume_path)
+        return {'provider_location': export_info['location'],
+                'provider_auth': export_info['auth'],}
 
     def remove_export(self, context, volume):
         self.connector.remove_export(context, volume)
 
-    def attach_volume(self, context, volume, instance_uuid, host_name, mountpoint):
-        self.connector.attach(context, volume)
-
-    def detach_volume(self, context, volume):
-        self.connector.attach(context, volume)
-
     def initialize_connection(self, volume, connector):
-        self.connector.initialize_connection(volume, connector)
+        return self.connector.initialize_connection(volume, connector)
 
     def terminate_connection(self, volume, connector, **kwargs):
         self.connector.terminate_connection(volume, **kwargs)
@@ -527,6 +523,6 @@ class LVMVolumeDriver(driver.VolumeDriver):
                              self.configuration.volume_dd_blocksize,
                              execute=self._execute)
         self._delete_volume(volume)
-        model_update = self._create_export(ctxt, volume, vg=dest_vg)
+        ###jdg fixme model_update = self.create_export(ctxt, volume, vg=dest_vg)
 
         return (True, model_update)
