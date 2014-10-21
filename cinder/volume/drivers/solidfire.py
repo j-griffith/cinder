@@ -194,6 +194,7 @@ class SolidFireDriver(SanISCSIDriver):
         sfaccount = None
         params = {'username': sf_account_name}
         try:
+            LOG.debug('Issue GetAccountByName with name: %s' % sf_account_name)
             data = self._issue_api_request('GetAccountByName', params)
             if 'result' in data and 'account' in data['result']:
                 LOG.debug('Found solidfire account: %s', sf_account_name)
@@ -203,6 +204,7 @@ class SolidFireDriver(SanISCSIDriver):
                 return sfaccount
             else:
                 raise
+        LOG.debug('Returning SolidFire Account object: %s' % sfaccount)
         return sfaccount
 
     def _get_sf_account_name(self, project_id):
@@ -518,6 +520,13 @@ class SolidFireDriver(SanISCSIDriver):
                   'enable512e': self.configuration.sf_emulate_512,
                   'attributes': attributes,
                   'qos': qos}
+
+        # NOTE(jdg): Check if we're a migration tgt, if so
+        # use the old volume-id here for the SF Name
+        migration_status = volume.get('migration_status', None)
+        if migration_status and 'target' in migration_status:
+            k, v = migration_status.split(':')
+            params['name'] = 'UUID-%s' % v
 
         return self._do_volume_create(volume['project_id'], params)
 
@@ -919,3 +928,29 @@ class SolidFireDriver(SanISCSIDriver):
                                        params, version='5.0')
         if 'result' not in data:
             raise exception.SolidFireAPIDataException(data=data)
+
+    def complete_volume_migration(self, ctxt, volume, new_volume):
+
+        sfaccount = self._get_sfaccount(new_volume['project_id'])
+        params = {'accountID': sfaccount['accountID']}
+        sf_vol = self._get_sf_volume(volume['id'], params)
+
+        if sf_vol is None:
+            raise exception.VolumeNotFound(volume_id=new_volume['id'])
+
+        attributes = {}
+        for k, v in sf_vol['attributes'].items():
+            attributes[k] = str(v)
+
+        attributes['migration_id'] = new_volume['id']
+        params = {
+            'volumeID': sf_vol['volumeID'],
+            'attributes': attributes
+        }
+        data = self._issue_api_request('ModifyVolume',
+                                       params, version='5.0')
+
+        if 'result' not in data:
+            raise exception.SolidFireAPIDataException(data=data)
+
+        return self._do_export(new_volume)

@@ -2806,6 +2806,10 @@ class VolumeTestCase(BaseVolumeTestCase):
                        lambda *args: self.volume.attach_volume(args[1],
                                                                args[2]['id'],
                                                                *args[3:]))
+        self.stubs.Set(volume_rpcapi.VolumeAPI, 'complete_volume_migration',
+                       lambda *args: self.volume.attach_volume(args[1],
+                                                               args[2]['id'],
+                                                               *args[3:]))
         self.stubs.Set(self.volume.driver, 'attach_volume',
                        lambda *args, **kwargs: None)
 
