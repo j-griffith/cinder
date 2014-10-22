@@ -828,7 +828,7 @@ class VolumeDriver(object):
         """
         return None
 
-    def complete_volume_migration(self, ctxt, volume, new_volume):
+    def update_migrated_volume(self, ctxt, volume, new_volume):
         """Return model update for migrated volume.
 
         :param volume: The original volume that was migrated to this backend

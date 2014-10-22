@@ -57,7 +57,7 @@ class VolumeAPI(object):
         1.18 - Adds create_consistencygroup, delete_consistencygroup,
                create_cgsnapshot, and delete_cgsnapshot. Also adds
                the consistencygroup_id parameter in create_volume.
-        1.19 - Adds complete_volume_migration
+        1.19 - Adds update_migrated_volume
     '''
 
     BASE_RPC_API_VERSION = '1.0'
@@ -228,10 +228,10 @@ class VolumeAPI(object):
         cctxt = self.client.prepare(server=new_host, version='1.17')
         cctxt.cast(ctxt, 'reenable_replication', volume_id=volume['id'])
 
-    def complete_volume_migration(self, ctxt, volume, new_volume):
+    def update_migrated_volume(self, ctxt, volume, new_volume):
         host = utils.extract_host(new_volume['host'])
         cctxt = self.client.prepare(server=host, version='1.19')
         cctxt.cast(ctxt,
-                   'complete_volume_migration',
+                   'update_migrated_volume',
                    volume=volume,
                    new_volume=new_volume)

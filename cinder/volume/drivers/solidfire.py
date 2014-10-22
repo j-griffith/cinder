@@ -21,7 +21,7 @@ import time
 
 from oslo.config import cfg
 import requests
-from six import wraps
+import six
 
 from cinder import context
 from cinder import exception
@@ -63,7 +63,7 @@ CONF.register_opts(sf_opts)
 
 def retry(exc_tuple, tries=5, delay=1, backoff=2):
     def retry_dec(f):
-        @wraps(f)
+        @six.wraps(f)
         def func_retry(*args, **kwargs):
             _tries, _delay = tries, delay
             while _tries > 1:
@@ -371,7 +371,7 @@ class SolidFireDriver(SanISCSIDriver):
                       'created_at': create_time}
         if qos:
             params['qos'] = qos
-            for k, v in qos.items():
+            for k, v in six.iteritems(qos):
                 attributes[k] = str(v)
 
         params['attributes'] = attributes
@@ -430,7 +430,7 @@ class SolidFireDriver(SanISCSIDriver):
         else:
             kvs = specs
 
-        for key, value in kvs.iteritems():
+        for key, value in six.iteritems(kvs):
             if ':' in key:
                 fields = key.split(':')
                 key = fields[1]
@@ -510,7 +510,7 @@ class SolidFireDriver(SanISCSIDriver):
                       'is_clone': 'False',
                       'created_at': create_time}
         if qos:
-            for k, v in qos.items():
+            for k, v in six.iteritems(qos):
                 attributes[k] = str(v)
 
         params = {'name': 'UUID-%s' % volume['id'],
@@ -817,7 +817,7 @@ class SolidFireDriver(SanISCSIDriver):
 
         if qos:
             params['qos'] = qos
-            for k, v in qos.items():
+            for k, v in six.iteritems(qos):
                 attributes[k] = str(v)
             params['attributes'] = attributes
 
@@ -864,7 +864,7 @@ class SolidFireDriver(SanISCSIDriver):
                       'os_imported_at': import_time,
                       'old_name': sfname}
         if qos:
-            for k, v in qos.items():
+            for k, v in six.iteritems(qos):
                 attributes[k] = str(v)
 
         params = {'name': volume['name'],
@@ -929,17 +929,22 @@ class SolidFireDriver(SanISCSIDriver):
         if 'result' not in data:
             raise exception.SolidFireAPIDataException(data=data)
 
-    def complete_volume_migration(self, ctxt, volume, new_volume):
+    def update_migrated_volume(self, ctxt, volume, new_volume):
 
         sfaccount = self._get_sfaccount(new_volume['project_id'])
         params = {'accountID': sfaccount['accountID']}
         sf_vol = self._get_sf_volume(volume['id'], params)
 
         if sf_vol is None:
-            raise exception.VolumeNotFound(volume_id=new_volume['id'])
+            msg = _('Failed to find target migration volume '
+                    'after completion/renaming operations ( '
+                    'NewVol-Name: %(new_volid)s, Target-Name: %(volid)s)')
+            LOG.error(msg % {'new_volid': new_volume['id'],
+                             'volid': volume['id']})
+            raise exception.VolumeNotFound(volume_id=volume['id'])
 
         attributes = {}
-        for k, v in sf_vol['attributes'].items():
+        for k, v in six.iteritems(sf_vol['attributes']):
             attributes[k] = str(v)
 
         attributes['migration_id'] = new_volume['id']

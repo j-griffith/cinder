@@ -1109,9 +1109,9 @@ class VolumeManager(manager.SchedulerDependentManager):
         # Give driver (new_volume) a chance to update things as needed
         # Note this needs to go through rpc to the host of the new volume
         # the current host and driver object is for the "existing" volume
-        rpcapi.complete_volume_migration(ctxt,
-                                         volume,
-                                         new_volume)
+        rpcapi.update_migrated_volume(ctxt,
+                                      volume,
+                                      new_volume)
         self.db.finish_volume_migration(ctxt, volume_id, new_volume_id)
         self.db.volume_destroy(ctxt, new_volume_id)
         if status_update.get('status') == 'in-use':
@@ -1957,14 +1957,14 @@ class VolumeManager(manager.SchedulerDependentManager):
 
         return True
 
-    def complete_volume_migration(self, ctxt, volume, new_volume):
+    def update_migrated_volume(self, ctxt, volume, new_volume):
         """Finalize migration process on backend device."""
 
         model_update = None
-        model_update = self.driver.complete_volume_migration(ctxt,
-                                                             volume,
-                                                             new_volume)
+        model_update = self.driver.update_migrated_volume(ctxt,
+                                                          volume,
+                                                          new_volume)
         if model_update:
-            self.db.volume_update(context.elevated(),
+            self.db.volume_update(ctxt.elevated(),
                                   volume['id'],
                                   model_update)

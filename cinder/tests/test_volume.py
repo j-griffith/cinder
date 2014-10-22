@@ -2769,6 +2769,12 @@ class VolumeTestCase(BaseVolumeTestCase):
                        lambda x, y, z, remote='dest': True)
         self.stubs.Set(volume_rpcapi.VolumeAPI, 'delete_volume',
                        fake_delete_volume_rpc)
+        self.stubs.Set(volume_rpcapi.VolumeAPI,
+                       'update_migrated_volume',
+                       lambda *args: self.volume.update_migrated_volume(
+                           self.context,
+                           args[1],
+                           args[2]))
         error_logs = []
         LOG = logging.getLogger('cinder.volume.manager')
         self.stubs.Set(LOG, 'error', lambda x: error_logs.append(x))
@@ -2806,10 +2812,12 @@ class VolumeTestCase(BaseVolumeTestCase):
                        lambda *args: self.volume.attach_volume(args[1],
                                                                args[2]['id'],
                                                                *args[3:]))
-        self.stubs.Set(volume_rpcapi.VolumeAPI, 'complete_volume_migration',
-                       lambda *args: self.volume.attach_volume(args[1],
-                                                               args[2]['id'],
-                                                               *args[3:]))
+
+        self.stubs.Set(volume_rpcapi.VolumeAPI, 'update_migrated_volume',
+                       lambda *args: self.volume.update_migrated_volume(
+                           elevated,
+                           args[1],
+                           args[2]))
         self.stubs.Set(self.volume.driver, 'attach_volume',
                        lambda *args, **kwargs: None)
 
