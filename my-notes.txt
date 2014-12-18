@@ -1,0 +1,2 @@
+Fixed first two merge conflicts, finish fixing conflicts then continue
+("git cherry-pick --continue")

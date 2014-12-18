@@ -1772,7 +1772,9 @@ class VolumeTestCase(BaseVolumeTestCase):
                               size=None):
             pass
 
-        def fake_clone_image(volume_ref, image_location, image_id, image_meta):
+        def fake_clone_image(ctx, volume_ref,
+                             image_location, image_meta,
+                             image_service):
             return {'provider_location': None}, True
 
         dst_fd, dst_path = tempfile.mkstemp()
