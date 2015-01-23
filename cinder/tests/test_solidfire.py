@@ -98,7 +98,7 @@ class SolidFireVolumeTestCase(test.TestCase):
 
         return endpoint
 
-    def fake_issue_api_request(obj, method, params, version='1.0'):
+    def fake_issue_api_request(obj, method, params, endpoint, version='1.0'):
         if method is 'GetClusterCapacity' and version == '1.0':
             LOG.info('Called Fake GetClusterCapacity...')
             data = {'result':
