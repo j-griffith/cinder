@@ -16,7 +16,6 @@
 import base64
 import httplib
 import json
-import math
 import random
 import socket
 import string
@@ -27,9 +26,10 @@ from oslo.config import cfg
 
 from cinder import context
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder import utils
 from cinder.image import image_utils
 from cinder.openstack.common import log as logging
+from cinder.openstack.common import processutils
 from cinder.openstack.common import timeutils
 from cinder import units
 from cinder.volume.drivers.san.san import SanISCSIDriver
@@ -55,7 +55,7 @@ sf_opts = [
                     '(previous default behavior).  The default is NO prefix.'),
 
     cfg.StrOpt('sf_template_account_name',
-               default='openstack-vtemplate',
+               default='icehouse-vtemplate',
                help='Account name on the SolidFire Cluster to use as owner of '
                     'template/cache volumes (created if doesnt exist).'),
 
@@ -81,10 +81,12 @@ class SolidFireDriver(SanISCSIDriver):
     Version history:
         1.0 - Initial driver
         1.1 - Refactor, clone support, qos by type and minor bug fixes
+        1.2 - Add xfr and retype support
+        1.2.a - Backport template volumes
 
     """
 
-    VERSION = '1.2.0'
+    VERSION = '1.2.a'
 
     sf_qos_dict = {'slow': {'minIOPS': 100,
                             'maxIOPS': 200,
@@ -102,6 +104,12 @@ class SolidFireDriver(SanISCSIDriver):
 
     sf_qos_keys = ['minIOPS', 'maxIOPS', 'burstIOPS']
     cluster_stats = {}
+    retryable_errors = ['xDBVersionMismatch',
+                        'xMaxSnapshotsPerVolumeExceeded',
+                        'xMaxClonesPerVolumeExceeded',
+                        'xMaxSnapshotsPerNodeExceeded',
+                        'xMaxClonesPerNodeExceeded',
+                        'xNotReadyForIO']
 
     def __init__(self, *args, **kwargs):
         super(SolidFireDriver, self).__init__(*args, **kwargs)
@@ -110,6 +118,9 @@ class SolidFireDriver(SanISCSIDriver):
             self._update_cluster_status()
         except exception.SolidFireAPIException:
             pass
+        if self.configuration.sf_allow_template_caching:
+            account = self.configuration.sf_template_account_name
+            self.template_account_id = self._create_template_account(account)
 
     def _issue_api_request(self, method_name, params, version='1.0'):
         """All API requests to SolidFire device go through this method.
@@ -119,10 +130,6 @@ class SolidFireDriver(SanISCSIDriver):
         and returns results in a dict as well.
 
         """
-        max_simultaneous_clones = ['xMaxSnapshotsPerVolumeExceeded',
-                                   'xMaxClonesPerVolumeExceeded',
-                                   'xMaxSnapshotsPerNodeExceeded',
-                                   'xMaxClonesPerNodeExceeded']
         host = self.configuration.san_ip
         port = self.configuration.sf_api_port
 
@@ -149,8 +156,9 @@ class SolidFireDriver(SanISCSIDriver):
             if cluster_password is not None:
                 # base64.encodestring includes a newline character
                 # in the result, make sure we strip it off
-                auth_key = base64.encodestring('%s:%s' % (cluster_admin,
-                                               cluster_password))[:-1]
+                auth_key = base64.encodestring(
+                    '%s:%s' % (cluster_admin,
+                               cluster_password))[:-1]
                 header['Authorization'] = 'Basic %s' % auth_key
 
             LOG.debug(_("Payload for SolidFire API call: %s"), payload)
@@ -189,34 +197,44 @@ class SolidFireDriver(SanISCSIDriver):
                     msg = _("Call to json.loads() raised "
                             "an exception: %s") % exc
                     raise exception.SfJsonEncodeFailure(msg)
-
                 connection.close()
 
             LOG.debug(_("Results of SolidFire API call: %s"), data)
+            if (('error' in data) and
+                    (data['error']['name'] in self.retryable_errors)):
+                msg = ('Retryable error (%s) encountered during '
+                       'SolidFire API call.' % data['error']['name'])
+                LOG.debug(msg)
+                time.sleep(1)
+                retry_count -= 1
 
-            if 'error' in data:
-                if data['error']['name'] in max_simultaneous_clones:
-                    LOG.warning(_('Clone operation '
-                                  'encountered: %s') % data['error']['name'])
-                    LOG.warning(_(
-                        'Waiting for outstanding operation '
-                        'before retrying snapshot: %s') % params['name'])
-                    time.sleep(5)
-                    # Don't decrement the retry count for this one
-                elif 'xDBVersionMismatch' in data['error']['name']:
-                    LOG.warning(_('Detected xDBVersionMismatch, '
-                                'retry %s of 5') % (5 - retry_count))
-                    time.sleep(1)
-                    retry_count -= 1
-                elif 'xUnknownAccount' in data['error']['name']:
-                    retry_count = 0
-                else:
-                    msg = _("API response: %s") % data
-                    raise exception.SolidFireAPIException(msg)
+            elif 'error' in data:
+                msg = _('API response: %s') % data
+                raise exception.SolidFireAPIException(msg)
             else:
                 retry_count = 0
-
         return data
+
+    def _create_template_account(self, account_name):
+        # We raise an API exception if the account doesn't exist
+
+        # We need to take account_prefix settings into consideration
+        # This just uses the same method to do template account create
+        # as we use for any other OpenStack account
+        account_name = self._get_sf_account_name(account_name)
+        try:
+            id = self._issue_api_request(
+                'GetAccountByName',
+                {'username': account_name})['result']['account']['accountID']
+        except exception.SolidFireAPIException:
+            chap_secret = self._generate_random_string(12)
+            params = {'username': account_name,
+                      'initiatorSecret': chap_secret,
+                      'targetSecret': chap_secret,
+                      'attributes': {}}
+            id = self._issue_api_request('AddAccount',
+                                         params)['result']['accountID']
+        return id
 
     def _get_volumes_by_sfaccount(self, account_id):
         """Get all volumes on cluster for specified account."""
@@ -229,10 +247,16 @@ class SolidFireDriver(SanISCSIDriver):
         """Get SolidFire account object by name."""
         sfaccount = None
         params = {'username': sf_account_name}
-        data = self._issue_api_request('GetAccountByName', params)
-        if 'result' in data and 'account' in data['result']:
-            LOG.debug(_('Found solidfire account: %s'), sf_account_name)
-            sfaccount = data['result']['account']
+        try:
+            data = self._issue_api_request('GetAccountByName', params)
+            if 'result' in data and 'account' in data['result']:
+                LOG.debug('Found solidfire account: %s', sf_account_name)
+                sfaccount = data['result']['account']
+        except exception.SolidFireAPIException as ex:
+            if 'xUnknownAccount' in ex.msg:
+                pass
+            else:
+                raise
         return sfaccount
 
     def _get_sf_account_name(self, project_id):
@@ -353,7 +377,7 @@ class SolidFireDriver(SanISCSIDriver):
         attributes = {}
         qos = {}
 
-        sfaccount = self._get_sfaccount(src_project_id)
+        sfaccount = self._create_sfaccount(src_project_id)
         params = {'accountID': sfaccount['accountID']}
 
         sf_vol = self._get_sf_volume(src_uuid, params)
@@ -375,8 +399,8 @@ class SolidFireDriver(SanISCSIDriver):
                   'newAccountID': sfaccount['accountID']}
         data = self._issue_api_request('CloneVolume', params)
 
-        if (('result' not in data) or ('volumeID' not in data['result'])):
-            msg = _("API response: %s") % data
+        if ('result' not in data) or ('volumeID' not in data['result']):
+            msg = (_("API response: %s") % data)
             raise exception.SolidFireAPIException(msg)
         sf_volume_id = data['result']['volumeID']
 
@@ -428,7 +452,7 @@ class SolidFireDriver(SanISCSIDriver):
         params['accountID'] = sfaccount['accountID']
         data = self._issue_api_request('CreateVolume', params)
 
-        if (('result' not in data) or ('volumeID' not in data['result'])):
+        if ('result' not in data) or ('volumeID' not in data['result']):
             msg = _("Failed volume create: %s") % data
             raise exception.SolidFireAPIException(msg)
 
@@ -484,13 +508,13 @@ class SolidFireDriver(SanISCSIDriver):
 
         found_count = 0
         sf_volref = None
-        for v in data['result']['volumes']:
-            if uuid in v['name']:
+        for vol in data['result']['volumes']:
+            if uuid in vol['name']:
                 found_count += 1
-                sf_volref = v
+                sf_volref = vol
                 LOG.debug(_("Mapped SolidFire volumeID %(sfid)s "
                             "to cinder ID %(uuid)s.") %
-                          {'sfid': v['volumeID'],
+                          {'sfid': vol['volumeID'],
                            'uuid': uuid})
 
         if found_count == 0:
@@ -507,72 +531,115 @@ class SolidFireDriver(SanISCSIDriver):
 
         return sf_volref
 
+    def _attach_sfvol(self, tvol, connection_properties):
+        self._do_export(tvol)
+        conn = self.initialize_connection(tvol, connection_properties)
+
+        use_multipath = False
+        device_scan_attempts = self.configuration.num_volume_device_scan_tries
+        protocol = conn['driver_volume_type']
+        connector = utils.brick_get_connector(
+            protocol,
+            use_multipath=use_multipath,
+            device_scan_attempts=device_scan_attempts,
+            conn=conn)
+        device = connector.connect_volume(conn['data'])
+        host_device = device['path']
+
+        if not connector.check_valid_device(host_device):
+            raise exception.DeviceUnavailable(path=host_device,
+                                              reason=(_("Unable to access "
+                                                        "the backend storage "
+                                                        "via the path "
+                                                        "%(path)s.") %
+                                                      {'path': host_device}))
+        return {'conn': conn, 'device': device, 'connector': connector}
+
     def _create_image_volume(self, context,
                              image_meta, image_service,
                              image_id):
-        # NOTE(jdg): It's callers responsibility to ensure that
-        # the optional properties.virtual_size is set on the image
-        # before we get here
-        virt_size = int(image_meta['properties'].get('virtual_size'))
-        min_sz_in_bytes =\
-            math.ceil(virt_size / float(units.Gi)) * float(units.Gi)
-        min_sz_in_gig = math.ceil(min_sz_in_bytes / float(units.Gi))
+        with image_utils.temporary_file() as tmp:
+            try:
+                # Use the empty tmp file to make sure qemu_img_info works.
+                image_utils.qemu_img_info(tmp)
+            except processutils.ProcessExecutionError:
+                qemu_img = False
+                if image_meta:
+                    if image_meta['disk_format'] != 'raw':
+                        raise exception.ImageUnacceptable(
+                            reason=_("qemu-img is not installed and image is "
+                                     "of type %s.  Only RAW images can be "
+                                     "used if qemu-img is not installed.") %
+                            image_meta['disk_format'],
+                            image_id=image_id)
+                else:
+                    raise exception.ImageUnacceptable(
+                        reason=_("qemu-img is not installed and the disk "
+                                 "format is not specified.  Only RAW images "
+                                 "can be used if qemu-img is not installed."),
+                        image_id=image_id)
 
-        attributes = {}
-        attributes['image_info'] = {}
-        attributes['image_info']['image_updated_at'] =\
-            image_meta['updated_at'].isoformat()
-        attributes['image_info']['image_name'] =\
-            image_meta['name']
-        attributes['image_info']['image_created_at'] =\
-            image_meta['created_at'].isoformat()
-        attributes['image_info']['image_id'] = image_meta['id']
+            image_utils.fetch(context, image_service,
+                              image_id, tmp,
+                              context.user_id, context.project_id)
+            image_meta = image_service.show(context, image_id)
 
-        params = {'name': 'OpenStackIMG-%s' % image_id,
-                  'accountID': None,
-                  'sliceCount': 1,
-                  'totalSize': int(min_sz_in_bytes),
-                  'enable512e': self.configuration.sf_emulate_512,
-                  'attributes': attributes,
-                  'qos': {}}
+            attributes = {}
+            attributes['image_info'] = {}
+            attributes['image_info']['image_updated_at'] =\
+                image_meta['updated_at'].isoformat()
+            attributes['image_info']['image_name'] =\
+                image_meta['name']
+            attributes['image_info']['image_created_at'] =\
+                image_meta['created_at'].isoformat()
+            attributes['image_info']['image_id'] = image_meta['id']
+            total_size = int(image_meta['size'])
+            if total_size < units.GiB:
+                total_size = int(units.GiB)
+            params = {'name': 'OpenStackIMG-%s' % image_id,
+                      'accountID': None,
+                      'sliceCount': 1,
+                      'totalSize': total_size,
+                      'enable512e': self.configuration.sf_emulate_512,
+                      'attributes': attributes,
+                      'qos': {}}
 
-        account = self.configuration.sf_template_account_name
-        template_vol = self._do_volume_create(account, params)
-        tvol = {}
-        tvol['id'] = image_id
-        tvol['provider_location'] = template_vol['provider_location']
-        tvol['provider_auth'] = template_vol['provider_auth']
+            account = self.configuration.sf_template_account_name
 
-        connector = 'na'
-        conn = self.initialize_connection(tvol, connector)
-        attach_info = super(SolidFireDriver, self)._connect_device(conn)
+            template_vol = self._do_volume_create(account, params)
+            tvol = {}
+            tvol['id'] = image_id
+            tvol['provider_location'] = template_vol['provider_location']
+            tvol['provider_auth'] = template_vol['provider_auth']
+            tvol['project_id'] = account
 
-        sfaccount = self._get_sfaccount(account)
-        params = {'accountID': sfaccount['accountID']}
-        properties = 'na'
+            connection_properties = utils.brick_get_connector_properties()
+            attach_info = self._attach_sfvol(tvol, connection_properties)
+            try:
+                image_utils.fetch_to_raw(
+                    context,
+                    image_service,
+                    image_id,
+                    attach_info['device']['path'],
+                    self.configuration.volume_dd_blocksize)
+            except Exception as exc:
+                params['volumeID'] = template_vol['volumeID']
+                LOG.error(_('Failed image conversion during cache '
+                            'creation: %s'),
+                          exc)
+                LOG.debug('Removing SolidFire Cache Volume (SF ID): %s',
+                          template_vol['volumeID'])
 
-        try:
-            image_utils.fetch_to_raw(context,
-                                     image_service,
-                                     image_id,
-                                     attach_info['device']['path'],
-                                     self.configuration.volume_dd_blocksize,
-                                     size=min_sz_in_gig)
-        except Exception as exc:
-            params['volumeID'] = template_vol['volumeID']
-            LOG.error(_LE('Failed image conversion during cache creation: %s'),
-                      exc)
-            LOG.debug('Removing SolidFire Cache Volume (SF ID): %s',
-                      template_vol['volumeID'])
+                self._detach_volume(context,
+                                    attach_info,
+                                    tvol,
+                                    connection_properties)
+                self._issue_api_request('DeleteVolume', params)
 
-            self._detach_volume(context, attach_info, tvol, properties)
-            self._issue_api_request('DeleteVolume', params)
-            return
-
-        self._detach_volume(context, attach_info, tvol, properties)
+        self._detach_volume(context, attach_info, tvol, connection_properties)
         sf_vol = self._get_sf_volume(image_id, params)
-        LOG.debug('Successfully created SolidFire Image Template ',
-                  'for image-id: %s', image_id)
+        LOG.debug(_('Successfully created SolidFire Image Template '
+                    'for image-id: %s'), image_id)
         return sf_vol
 
     def _verify_image_volume(self, context, image_meta, image_service):
@@ -622,16 +689,8 @@ class SolidFireDriver(SanISCSIDriver):
         # Is the image owned by this tenant or public?
         if ((not image_meta.get('is_public', False)) and
                 (image_meta['owner'] != volume['project_id'])):
-                LOG.warning(_LW("Requested image is not "
-                                "accesible by current Tenant."))
-                return None, False
-
-        # Is virtual_size property set on the image?
-        if ((not image_meta.get('properties', None)) or
-                (not image_meta['properties'].get('virtual_size', None))):
-            LOG.info(_LI('Unable to create cache volume because image: %s '
-                         'does not include properties.virtual_size'),
-                     image_meta['id'])
+            LOG.warning(_("Requested image is not "
+                          "accesible by current Tenant."))
             return None, False
 
         try:
@@ -642,6 +701,7 @@ class SolidFireDriver(SanISCSIDriver):
             return None, False
 
         account = self.configuration.sf_template_account_name
+
         try:
             (data, sfaccount, model) = self._do_clone_volume(image_meta['id'],
                                                              account,
