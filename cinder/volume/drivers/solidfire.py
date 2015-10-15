@@ -174,6 +174,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         self.template_account_id = None
         self.max_volumes_per_account = 1990
         self.volume_map = {}
+        self.cluster_pairs = []
 
         try:
             self._update_cluster_status()
@@ -185,9 +186,41 @@ class SolidFireDriver(san.SanISCSIDriver):
         self.target_driver = SolidFireISCSI(solidfire_driver=self,
                                             configuration=self.configuration)
         self._set_cluster_uuid()
+        if self.configuration.get('replication_device', []):
+            self._init_cluster_pair()
 
     def __getattr__(self, attr):
         return getattr(self.target_driver, attr)
+
+    def _init_cluster_pairs(self, devices):
+        self.cluster_pairs = self._list_cluster_pairs()
+        if not self.configuration.get('managed_replication_target', False):
+            LOG.error(_LE('SolidFire currently only supports managed '
+                          'managed replication targets.'))
+            return
+        for device in devices:
+            remote = next(
+                (item for item in self.cluster_pairs if
+                 item['clusterName'] == device['cluster_name']), None)
+            if not remote:
+                remote_cluster = {
+                    'host': device.get('backend_name', None),
+                    'mvip': device.get('mvip', None),
+                    'login': device.get('login', None),
+                    'passwd': device.get('password', None),
+                    'cluster_name': device.get('remote_device_id', None)}
+                try:
+                    endpoint = self._build_endpoint_info(**remote_cluster)
+                    self._create_cluster_pairing(endpoint)
+                except exception.SolidFireAPIException as ex:
+                    LOG.error(_LE('Cluster pairing setup failed: %s'),
+                              ex.msg)
+                    LOG.error(_LE('Replication is disabled'))
+                    pass
+
+        # NOTE(jdg): Cluster is the source of truth, regardless
+        # of what we added, if it's not reported it doesn't count
+        self.cluster_pairs = self._list_cluster_pairs()
 
     def _set_cluster_uuid(self):
         self.cluster_uuid = (
@@ -498,6 +531,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         type_id = vref.get('volume_type_id', None)
         if type_id is not None:
             qos = self._set_qos_by_volume_type(ctxt, type_id)
+            rep_data = self._set_replication_by_volume_type(ctxt, type_id)
 
         # NOTE(jdg): all attributes are copied via clone, need to do an update
         # to set any that were provided
@@ -525,6 +559,10 @@ class SolidFireDriver(san.SanISCSIDriver):
         # We're only doing this for clones, not create_from snaps
         if is_clone:
             data = self._update_attributes(sf_vol)
+
+        # FIXME(jdg): yuk
+        if rep_data:
+            pass
         return (data, sf_account, model_update)
 
     def _update_attributes(self, sf_vol):
@@ -574,6 +612,22 @@ class SolidFireDriver(san.SanISCSIDriver):
                 if i.key in self.sf_qos_keys:
                     qos[i.key] = int(i.value)
         return qos
+
+    def _set_replication_by_volume_type(self, ctxt, type_id):
+        valid_replication_keys = ['replication_type',
+                                  'replication_count',
+                                  'replication_enabled']
+
+        rep_data = {}
+        volume_type = volume_types.get_volume_type(ctxt, type_id)
+        specs = volume_type.get('extra_specs')
+        for key, value in specs.items():
+            if ':' in key:
+                fields = key.split(':')
+                key = fields[1]
+            if key in valid_replication_keys:
+                rep_data[key] = value
+        return rep_data
 
     def _set_qos_by_volume_type(self, ctxt, type_id):
         qos = {}
@@ -898,6 +952,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         type_id = volume['volume_type_id']
         if type_id is not None:
             qos = self._set_qos_by_volume_type(ctxt, type_id)
+            rep_data = self._set_replication_by_volume_type(ctxt, type_id)
 
         create_time = volume['created_at'].isoformat()
         attributes = {'uuid': volume['id'],
@@ -931,7 +986,13 @@ class SolidFireDriver(san.SanISCSIDriver):
             params['name'] = vname
             params['attributes']['migration_uuid'] = volume['id']
             params['attributes']['uuid'] = v
-        return self._do_volume_create(sf_account, params)
+
+        model_update = self._do_volume_create(sf_account, params)
+        if rep_data:
+            self._create_remote_volume(sf_account,
+                                       params,
+                                       rep_data['endpoint'])
+        return model_update
 
     def create_cloned_volume(self, volume, src_vref):
         """Create a clone of an existing volume."""
@@ -1298,6 +1359,140 @@ class SolidFireDriver(san.SanISCSIDriver):
 
         self._issue_api_request('ModifyVolume',
                                 params, version='5.0')
+
+    # BEGIN Replication-Methods #
+    def _create_remote_volume(self, src_sfaccount, params, endpoint):
+        remote_accounts = self._issue_api_request(
+            'ListAccounts', {}, endpoint=endpoint)['result']['accounts']
+        remote_sfaccount = None
+        for account in remote_accounts:
+            if src_sfaccount['username'] == account['username']:
+                remote_sfaccount = account
+                break
+        if not remote_sfaccount:
+            account_params = {
+                'username': src_sfaccount['username'],
+                'initiatorSecret': src_sfaccount['initiatorSecret'],
+                'targetSecret': src_sfaccount['targetSecret'],
+                'attributes': src_sfaccount['attributes']}
+            remote_account_id = self._issue_api_request(
+                'AddAccount',
+                account_params,
+                endpoint=endpoint)['result']['accountID']
+        params['accountID'] = remote_account_id
+        params['attributes']['is_replica'] = 'True'
+        return self._issue_api_request(
+            'CreateVolume', params, endpoint=endpoint)['result']['volumeID']
+
+    def _create_cluster_pairing(self, remote_endpoint):
+        pairing_info = self._issue_api_request('StartClusterPairing', {})
+        return self._issue_api_request(
+            'CompleteClusterPairing',
+            {'clusterPairingKey': pairing_info['clusterPairingKey']},
+            version='6.0', endpoint=remote_endpoint)['result']['clusterPairID']
+
+    def _pair_volumes(self, src_sfid, dest_sfid,
+                      remote_endpoint, mode='Async'):
+        pairing_key = self._issue_api_request(
+            'StartVolumePairing',
+            {'volumeID': src_sfid,
+             'mode': mode},
+            version='8.0')['result']['volumePairingKey']
+        self._issue_api_request('CompleteVolumePairing',
+                                {'volumeID': dest_sfid,
+                                 'volumePairingKey': pairing_key},
+                                version='8.0',
+                                endpoint=remote_endpoint)
+
+    def _modify_volume_pairing(self, sf_volid, pause_unpause, mode=None):
+        params = {'pausedManual': pause_unpause}
+        if mode:
+            params['mode'] = mode
+        self._issue_api_request('ModifyVolumePair',
+                                params,
+                                version='8.0')
+
+    def enable_replication(self, context, volume):
+        """Enable replication on a replication capable volume.
+
+        If the volume was created on a replication_enabled host this method
+        is used to enable replication for the volume. Primarily used for
+        testing and maintenance.
+
+        :param context: security context
+        :param volume: volume object returned by DB
+        """
+        sfvol = self._get_sf_volume(volume['id'])
+        self._modify_volume_pairing(sfvol['volumeID'], 'false')
+
+    def disable_replication(self, context, volume):
+        """Disable replication on the specified volume.
+
+        If the specified volume is currently replication enabled,
+        this method can be used to disable the replication process
+        on the backend.  This method assumes that we checked
+        replication status in the API layer to ensure we should
+        send this call to the driver.
+
+        :param context: security context
+        :param volume: volume object returned by DB
+        """
+        sfvol = self._get_sf_volume(volume['id'])
+        self._modify_volume_pairing(sfvol['volumeID'], 'true')
+
+    def failover_replication(self, context, volume, secondary=None):
+        """Force failover to a secondary replication target.
+
+        Forces the failover action of a replicated volume to one of its
+        secondary/target devices.  By default the choice of target devices
+        is left up to the driver.  In particular we expect one way
+        replication here, but are providing a mechanism for 'n' way
+        if supported/configrued.
+
+        Currently we leave it up to the driver to figure out how/what
+        to do here.  Rather than doing things like ID swaps, we instead
+        just let the driver figure out how/where to route things.
+
+        In cases where we might want to drop a volume-service node and
+        the replication target is a configured cinder backend, we'll
+        just update the host column for the volume.
+
+        :param context: security context
+        :param volume: volume object returned by DB
+        :param secondary: Specifies rep target to fail over to
+        """
+
+        # {'host': 'secondary-configured-cinder-backend',
+        #  'provider_location: 'foo',
+        #  'replication_driver_data': 'driver-specific-stuff-for-db'}
+        # Where 'host' is a valid cinder host string like
+        #  'foo@bar#bar' or 'foo@bar' and we'll add the #bar
+
+
+    def list_replication_targets(self, context, volume):
+        """Provide a means to obtain replication targets for a volume.
+
+        This method is used to query a backend to get the current
+        replication config info for the specified volume.
+
+        In the case of a volume that isn't being replicated,
+        the driver should return an empty list.
+
+
+        Example response for replicating to a managed backend:
+            {'volume_id': volume['id'],
+             'targets':[{'managed_host': 'backend_name'}...]
+
+        Example response for replicating to an unmanaged backend:
+            {'volume_id': volume['id'], 'targets':[{'san_ip': '1.1.1.1',
+                                                    'san_login': 'admin'},
+                                                    ....]}
+
+        NOTE: It's the responsibility of the driver to mask out any
+        passwords or sensitive information.
+
+        """
+        pass
 
 
 class SolidFireISCSI(iscsi_driver.SanISCSITarget):
