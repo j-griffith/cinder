@@ -186,29 +186,27 @@ class SolidFireDriver(san.SanISCSIDriver):
         self.target_driver = SolidFireISCSI(solidfire_driver=self,
                                             configuration=self.configuration)
         self._set_cluster_uuid()
-        if self.configuration.get('replication_device', []):
-            self._init_cluster_pair()
+        if self.configuration.safe_get('replication_device'):
+            self._init_cluster_pairs(self.configuration.get(
+                'replication_device'))
 
     def __getattr__(self, attr):
         return getattr(self.target_driver, attr)
 
     def _init_cluster_pairs(self, devices):
-        self.cluster_pairs = self._list_cluster_pairs()
-        if not self.configuration.get('managed_replication_target', False):
-            LOG.error(_LE('SolidFire currently only supports managed '
-                          'managed replication targets.'))
-            return
+        self.cluster_pairs = self._issue_api_request(
+            'ListClusterPairs', {}, version='8.0')['result']['clusterPairs']
         for device in devices:
             remote = next(
                 (item for item in self.cluster_pairs if
-                 item['clusterName'] == device['cluster_name']), None)
+                 item['clusterName'] == device['device_target_id']), None)
             if not remote:
                 remote_cluster = {
-                    'host': device.get('backend_name', None),
+                    'host': device.get('managed_backend_name', None),
                     'mvip': device.get('mvip', None),
                     'login': device.get('login', None),
                     'passwd': device.get('password', None),
-                    'cluster_name': device.get('remote_device_id', None)}
+                    'cluster_name': device.get('device_target_id', None)}
                 try:
                     endpoint = self._build_endpoint_info(**remote_cluster)
                     self._create_cluster_pairing(endpoint)
@@ -220,7 +218,8 @@ class SolidFireDriver(san.SanISCSIDriver):
 
         # NOTE(jdg): Cluster is the source of truth, regardless
         # of what we added, if it's not reported it doesn't count
-        self.cluster_pairs = self._list_cluster_pairs()
+        self.cluster_pairs = self._issue_api_request(
+            'ListClusterPairs', {}, version='8.0')['result']['clusterPairs']
 
     def _set_cluster_uuid(self):
         self.cluster_uuid = (
@@ -315,7 +314,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         endpoint['login'] = (
             kwargs.get('login', self.configuration.san_login))
         endpoint['passwd'] = (
-            kwargs.get('passwd', self.configuration.san_password))
+            kwargs.get('password', self.configuration.san_password))
         endpoint['port'] = (
             kwargs.get('port', self.configuration.sf_api_port))
         endpoint['url'] = 'https://%s:%s' % (endpoint['mvip'],
@@ -627,6 +626,13 @@ class SolidFireDriver(san.SanISCSIDriver):
                 key = fields[1]
             if key in valid_replication_keys:
                 rep_data[key] = value
+        pair_entry = random.choice(self.cluster_pairs)
+        if rep_data.get('replication_target', None):
+            pair_entry = next(
+                (cp for cp in self.cluster_pairs
+                 if cp["cluster_name"] == rep_data.get('replication_target')),
+                None)
+        rep_data['endpoint'] = self._build_endpoint_info(**pair_entry)
         return rep_data
 
     def _set_qos_by_volume_type(self, ctxt, type_id):
@@ -943,6 +949,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         slice_count = 1
         attributes = {}
         qos = {}
+        rep_data = None
 
         if (self.configuration.sf_allow_tenant_qos and
                 volume.get('volume_metadata')is not None):
@@ -989,9 +996,11 @@ class SolidFireDriver(san.SanISCSIDriver):
 
         model_update = self._do_volume_create(sf_account, params)
         if rep_data:
-            self._create_remote_volume(sf_account,
-                                       params,
-                                       rep_data['endpoint'])
+            dest_sfid = self._create_remote_volume(sf_account,
+                                                   params,
+                                                   rep_data['endpoint'])
+            src_sfid = model_update['provider_id'].split()[0]
+            self._pair_volumes(src_sfid, dest_sfid, rep_data['endpoint'])
         return model_update
 
     def create_cloned_volume(self, volume, src_vref):
@@ -1151,6 +1160,21 @@ class SolidFireDriver(san.SanISCSIDriver):
             results['deDuplicationPercent'])
         data['thin_provision_percent'] = (
             results['thinProvisioningPercent'])
+        data['replication_enabled'] = True
+        if self.cluster_pairs:
+            # NOTE(jdg): We want to report some things to the scheduler
+            # of course replication_enabled, but also what type of
+            # replication options are valid for our backend, and
+            # what's the max replication_count we can do
+            data['replication_enabled'] = True
+            # FIXME(jdg): Detect V7 and report async only
+            data['replication_type'] = ['async', 'sync']
+            # NOTE(jdg): For now limit to a max of 2 rep targets
+            pair_count = len(self.cluster_pairs)
+            if pair_count > 2:
+                pair_count = 2
+            data['replication_count'] = pair_count
+
         self.cluster_stats = data
 
     def attach_volume(self, context, volume,
@@ -1361,13 +1385,15 @@ class SolidFireDriver(san.SanISCSIDriver):
                                 params, version='5.0')
 
     # BEGIN Replication-Methods #
-    def _create_remote_volume(self, src_sfaccount, params, endpoint):
+    def _create_remote_volume(self, src_sfaccount, params,
+                              endpoint, replication_target=False):
         remote_accounts = self._issue_api_request(
             'ListAccounts', {}, endpoint=endpoint)['result']['accounts']
         remote_sfaccount = None
         for account in remote_accounts:
             if src_sfaccount['username'] == account['username']:
                 remote_sfaccount = account
+                remote_account_id = account['accountID']
                 break
         if not remote_sfaccount:
             account_params = {
@@ -1380,16 +1406,27 @@ class SolidFireDriver(san.SanISCSIDriver):
                 account_params,
                 endpoint=endpoint)['result']['accountID']
         params['accountID'] = remote_account_id
-        params['attributes']['is_replica'] = 'True'
-        return self._issue_api_request(
+        sf_volid = self._issue_api_request(
             'CreateVolume', params, endpoint=endpoint)['result']['volumeID']
+        if replication_target:
+            params = {'volumeID': sf_volid,
+                      'access': 'replicationTarget'}
+            self._issue_api_request(
+                'ModifyVolume', params, endpoint=endpoint)
+        return sf_volid
 
     def _create_cluster_pairing(self, remote_endpoint):
-        pairing_info = self._issue_api_request('StartClusterPairing', {})
-        return self._issue_api_request(
-            'CompleteClusterPairing',
-            {'clusterPairingKey': pairing_info['clusterPairingKey']},
-            version='6.0', endpoint=remote_endpoint)['result']['clusterPairID']
+        try:
+            pairing_info = self._issue_api_request('StartClusterPairing',
+                                                   {}, version='8.0')['result']
+            pair_id = self._issue_api_request(
+                'CompleteClusterPairing',
+                {'clusterPairingKey': pairing_info['clusterPairingKey']},
+                version='8.0',
+                endpoint=remote_endpoint)['result']['clusterPairID']
+        except exception as ex:
+            LOG.error(ex)
+        return pair_id
 
     def _pair_volumes(self, src_sfid, dest_sfid,
                       remote_endpoint, mode='Async'):
@@ -1467,7 +1504,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         #  'replication_driver_data': 'driver-specific-stuff-for-db'}
         # Where 'host' is a valid cinder host string like
         #  'foo@bar#bar' or 'foo@bar' and we'll add the #bar
-
+        pass
 
     def list_replication_targets(self, context, volume):
         """Provide a means to obtain replication targets for a volume.
@@ -1493,6 +1530,9 @@ class SolidFireDriver(san.SanISCSIDriver):
 
         """
         pass
+
+    def get_replication_updates(self, context):
+        return []
 
 
 class SolidFireISCSI(iscsi_driver.SanISCSITarget):
