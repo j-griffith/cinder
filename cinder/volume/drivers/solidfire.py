@@ -194,11 +194,12 @@ class SolidFireDriver(san.SanISCSIDriver):
         return getattr(self.target_driver, attr)
 
     def _init_cluster_pairs(self, devices):
-        self.cluster_pairs = self._issue_api_request(
+        self.cluster_pairs = []
+        existing_pairs = self._issue_api_request(
             'ListClusterPairs', {}, version='8.0')['result']['clusterPairs']
         for device in devices:
             remote = next(
-                (item for item in self.cluster_pairs if
+                (item for item in existing_pairs if
                  item['clusterName'] == device['device_target_id']), None)
             if not remote:
                 remote_cluster = {
@@ -210,16 +211,12 @@ class SolidFireDriver(san.SanISCSIDriver):
                 try:
                     endpoint = self._build_endpoint_info(**remote_cluster)
                     self._create_cluster_pairing(endpoint)
+                    self.cluster_pairs.append(remote_cluster)
                 except exception.SolidFireAPIException as ex:
                     LOG.error(_LE('Cluster pairing setup failed: %s'),
                               ex.msg)
                     LOG.error(_LE('Replication is disabled'))
                     pass
-
-        # NOTE(jdg): Cluster is the source of truth, regardless
-        # of what we added, if it's not reported it doesn't count
-        self.cluster_pairs = self._issue_api_request(
-            'ListClusterPairs', {}, version='8.0')['result']['clusterPairs']
 
     def _set_cluster_uuid(self):
         self.cluster_uuid = (
@@ -559,9 +556,13 @@ class SolidFireDriver(san.SanISCSIDriver):
         if is_clone:
             data = self._update_attributes(sf_vol)
 
-        # FIXME(jdg): yuk
         if rep_data:
-            pass
+            dest_sfid = self._create_remote_volume(sf_account,
+                                                   params,
+                                                   rep_data['endpoint'])
+            src_sfid = model_update['provider_id'].split()[0]
+            self._pair_volumes(src_sfid, dest_sfid, rep_data['endpoint'])
+
         return (data, sf_account, model_update)
 
     def _update_attributes(self, sf_vol):
@@ -626,6 +627,8 @@ class SolidFireDriver(san.SanISCSIDriver):
                 key = fields[1]
             if key in valid_replication_keys:
                 rep_data[key] = value
+        # NOTE(jdg): We're going to limit rep count to 1 for now
+        # but plan ahead and use random choice here
         pair_entry = random.choice(self.cluster_pairs)
         if rep_data.get('replication_target', None):
             pair_entry = next(
@@ -1160,20 +1163,17 @@ class SolidFireDriver(san.SanISCSIDriver):
             results['deDuplicationPercent'])
         data['thin_provision_percent'] = (
             results['thinProvisioningPercent'])
-        data['replication_enabled'] = True
-        if self.cluster_pairs:
+        data['replication_enabled'] = False
+        if len(self.cluster_pairs) >= 1:
             # NOTE(jdg): We want to report some things to the scheduler
             # of course replication_enabled, but also what type of
             # replication options are valid for our backend, and
             # what's the max replication_count we can do
             data['replication_enabled'] = True
-            # FIXME(jdg): Detect V7 and report async only
             data['replication_type'] = ['async', 'sync']
-            # NOTE(jdg): For now limit to a max of 2 rep targets
-            pair_count = len(self.cluster_pairs)
-            if pair_count > 2:
-                pair_count = 2
-            data['replication_count'] = pair_count
+            # TODO(jdg): First version is limited to a single replica
+            # later we'll inspect cluster_pairs and set based on that
+            data['replication_count'] = 1
 
         self.cluster_stats = data
 
@@ -1386,7 +1386,7 @@ class SolidFireDriver(san.SanISCSIDriver):
 
     # BEGIN Replication-Methods #
     def _create_remote_volume(self, src_sfaccount, params,
-                              endpoint, replication_target=False):
+                              endpoint, replication_target=True):
         remote_accounts = self._issue_api_request(
             'ListAccounts', {}, endpoint=endpoint)['result']['accounts']
         remote_sfaccount = None
@@ -1435,6 +1435,8 @@ class SolidFireDriver(san.SanISCSIDriver):
             {'volumeID': src_sfid,
              'mode': mode},
             version='8.0')['result']['volumePairingKey']
+
+        # FIXME(jdg): repv2:  try/except here?
         self._issue_api_request('CompleteVolumePairing',
                                 {'volumeID': dest_sfid,
                                  'volumePairingKey': pairing_key},
@@ -1445,6 +1447,8 @@ class SolidFireDriver(san.SanISCSIDriver):
         params = {'pausedManual': pause_unpause}
         if mode:
             params['mode'] = mode
+
+        # FIXME(jdg): repv2:  try/except here?
         self._issue_api_request('ModifyVolumePair',
                                 params,
                                 version='8.0')
@@ -1504,7 +1508,46 @@ class SolidFireDriver(san.SanISCSIDriver):
         #  'replication_driver_data': 'driver-specific-stuff-for-db'}
         # Where 'host' is a valid cinder host string like
         #  'foo@bar#bar' or 'foo@bar' and we'll add the #bar
-        pass
+
+        # NOTE(jdg): Number of things need to happen here:
+        # 1. make sure the target is up2date
+        # 2. convert the tgt volumes mode to R/W from replication only
+        # 3. update the host column/info
+        # 4. disable replication on the src
+        # 5. set replication status of the volume object to error
+        #    we failed over on an event, but... we're no longer
+        #    replicating.  Theme's the brakes
+        # 6. return host update info to adjust where the db points to
+        type_id = volume.get('volume_type_id', None)
+        if not type_id:
+            raise exception.SolidFireAPIException()
+
+        volumes = self._issue_api_request(
+            'ListActivePairedVolumes', {})['result']['volumes']
+        src_vol = next((vol for vol in volumes if vol['name'].replace(
+            self.configuration.sf_volume_prefix, '') == volume['id']), None)
+        if not src_vol:
+            raise exception.SolidFireAPIException()
+        dest_vol = random.choice(src_vol['volumePairs'])
+
+        if not dest_vol:
+            raise exception.SolidFireAPIException()
+        remote_volid = dest_vol['remoteVolumeID']
+        status = dest_vol['remoteReplication']['state']
+        if status != 'FIXME':
+            pass
+
+        rep_data = self._set_replication_by_volume_type(context, type_id)
+        self.disable_replication(context, volume)
+        params = {'volumeID': remote_volid,
+                  'access': 'readWrite'}
+        self._issue_api_request(
+            'ModifyVolume', params, endpoint=rep_data['endpoint'])
+        updated_host = None
+        for pair in self.cluster_pairs:
+            if pair['mvip'] == rep_data['endpoint']['mvip']:
+                updated_host = pair['managed_backend_name']
+        return {'host': updated_host}
 
     def list_replication_targets(self, context, volume):
         """Provide a means to obtain replication targets for a volume.
@@ -1532,7 +1575,22 @@ class SolidFireDriver(san.SanISCSIDriver):
         pass
 
     def get_replication_updates(self, context):
-        return []
+        # [{volid: n, status: ok|error,...}]
+        status_updates = []
+        volumes = self._issue_api_request(
+            'ListActivePairedVolumes', {})['result']['volumes']
+        for vol in volumes:
+            update_info = {}
+            update_info['id'] = vol['name'].replace(
+                self.configuration.sf_volume_prefix, '')
+            update_info['driver_status'] = (
+                vol['volume_pairs'][0]['remote_replication'])
+            state = update_info['driver_status'].get('state', None)
+            update_info['status'] = 'error'
+            if state and state == 'active':
+                update_info['status'] = 'ok'
+            status_updates.append(update_info)
+        return status_updates
 
 
 class SolidFireISCSI(iscsi_driver.SanISCSITarget):
