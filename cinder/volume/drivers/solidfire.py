@@ -209,8 +209,11 @@ class SolidFireDriver(san.SanISCSIDriver):
                     'passwd': device.get('password', None),
                     'cluster_name': device.get('device_target_id', None)}
                 try:
-                    endpoint = self._build_endpoint_info(**remote_cluster)
-                    self._create_cluster_pairing(endpoint)
+                    remote_cluster['endpoint'] = (
+                        self._build_endpoint_info(**remote_cluster))
+                    remote_cluster['pairing_id'] = (
+                        self._create_cluster_pairing(
+                            remote_cluster['endpoint']))
                     self.cluster_pairs.append(remote_cluster)
                 except exception.SolidFireAPIException as ex:
                     LOG.error(_LE('Cluster pairing setup failed: %s'),
@@ -1561,7 +1564,7 @@ class SolidFireDriver(san.SanISCSIDriver):
 
         Example response for replicating to a managed backend:
             {'volume_id': volume['id'],
-             'targets':[{'managed_host': 'backend_name'}...]
+             'targets':[{'manage_backend_name': 'backend-name'}...]
 
         Example response for replicating to an unmanaged backend:
             {'volume_id': volume['id'], 'targets':[{'san_ip': '1.1.1.1',
@@ -1572,7 +1575,24 @@ class SolidFireDriver(san.SanISCSIDriver):
         passwords or sensitive information.
 
         """
-        pass
+        type_id = volume.get('volume_type_id', None)
+        if not type_id:
+            raise exception.SolidFireAPIException()
+
+        volumes = self._issue_api_request(
+            'ListActivePairedVolumes', {})['result']['volumes']
+        src_vol = next((vol for vol in volumes if vol['name'].replace(
+            self.configuration.sf_volume_prefix, '') == volume['id']), None)
+        if not src_vol:
+            raise exception.SolidFireAPIException()
+        cpids = [pair['clusterPairID'] for pair in src_vol['volumePairs']]
+        response = {'volume_id': volume['id'], 'targets': []}
+        for pair in self.cluster_pairs:
+            if pair['cluster_pair_id'] in cpids:
+                response['targets'].append(
+                    {'host': pair['host'],
+                     'managed_backend_name': pair['managed_backend_name']})
+        return response
 
     def get_replication_updates(self, context):
         # [{volid: n, status: ok|error,...}]
