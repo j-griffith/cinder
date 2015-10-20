@@ -201,21 +201,21 @@ class SolidFireDriver(san.SanISCSIDriver):
             remote = next(
                 (item for item in existing_pairs if
                  item['clusterName'] == device['device_target_id']), None)
-            if not remote:
-                remote_cluster = {
-                    'host': device.get('managed_backend_name', None),
-                    'mvip': device.get('mvip', None),
-                    'login': device.get('login', None),
-                    'passwd': device.get('password', None),
-                    'cluster_name': device.get('device_target_id', None)}
-                try:
-                    remote_cluster['endpoint'] = (
-                        self._build_endpoint_info(**remote_cluster))
+            remote_cluster = {
+                'host': device.get('managed_backend_name', None),
+                'mvip': device.get('mvip', None),
+                'login': device.get('login', None),
+                'passwd': device.get('password', None),
+                'cluster_name': device.get('device_target_id', None)}
+            try:
+                remote_cluster['endpoint'] = (
+                    self._build_endpoint_info(**remote_cluster))
+                if not remote:
                     remote_cluster['pairing_id'] = (
                         self._create_cluster_pairing(
                             remote_cluster['endpoint']))
                     self.cluster_pairs.append(remote_cluster)
-                except exception.SolidFireAPIException as ex:
+            except exception.SolidFireAPIException as ex:
                     LOG.error(_LE('Cluster pairing setup failed: %s'),
                               ex.msg)
                     LOG.error(_LE('Replication is disabled'))
