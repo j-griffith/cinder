@@ -74,7 +74,17 @@ sf_opts = [
     cfg.IntOpt('sf_api_port',
                default=443,
                help='SolidFire API port. Useful if the device api is behind '
-                    'a proxy on a different port.'), ]
+                    'a proxy on a different port.'),
+
+    cfg.IntOpt('max_metadata_percentage',
+               default=85,
+               help='Maximum percentage of metadata to allocate '
+                    'before disabling scheduling of new volumes.'),
+
+    cfg.BoolOpt('purge_on_delete',
+                default=True,
+                help='Issue purge command immediately upon '
+                     'delete request.'), ]
 
 
 CONF = cfg.CONF
@@ -384,17 +394,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         else:
             new_size = v_ref['volume_size']
 
-        params = {'volumeID': int(sf_vol['volumeID']),
-                  'name': 'UUID-%s' % v_ref['id'],
-                  'newSize': int(new_size * units.Gi),
-                  'newAccountID': sfaccount['accountID']}
-        data = self._issue_api_request('CloneVolume', params)
-
-        if (('result' not in data) or ('volumeID' not in data['result'])):
-            msg = _("API response: %s") % data
-            raise exception.SolidFireAPIException(msg)
-        sf_volume_id = data['result']['volumeID']
-
+        # Update type change requests for QoS
         if (self.configuration.sf_allow_tenant_qos and
                 v_ref.get('volume_metadata')is not None):
             qos = self._set_qos_presets(v_ref)
@@ -404,10 +404,9 @@ class SolidFireDriver(san.SanISCSIDriver):
         if type_id is not None:
             qos = self._set_qos_by_volume_type(ctxt, type_id)
 
-        # NOTE(jdg): all attributes are copied via clone, need to do an update
-        # to set any that were provided
-        params = {'volumeID': sf_volume_id}
-
+        # Finally, don't forget to set new attributes
+        # otherwise we do a copy from the src which we don't
+        # have to do anymore
         create_time = timeutils.strtime(v_ref['created_at'])
         attributes = {'uuid': v_ref['id'],
                       'is_clone': 'True',
@@ -418,15 +417,33 @@ class SolidFireDriver(san.SanISCSIDriver):
             for k, v in qos.items():
                 attributes[k] = str(v)
 
-        params['attributes'] = attributes
-        data = self._issue_api_request('ModifyVolume', params)
+        params = {'volumeID': int(sf_vol['volumeID']),
+                  'name': 'UUID-%s' % v_ref['id'],
+                  'newSize': int(new_size * units.Gi),
+                  'newAccountID': sfaccount['accountID'],
+                  'attributes': attributes}
+
+        data = self._issue_api_request('CloneVolume', params, version='7.0')
+        if (('result' not in data) or ('volumeID' not in data['result'])):
+            msg = _("API response: %s") % data
+            # Let's make sure it's not one of our off cases where
+            # the volume was created, but we encountered an error
+            # from the API call
+            time.sleep(3)
+            clone = self._get_sf_volume(v_ref['id'], params)
+            if clone:
+                sf_volume_id = clone['volumeID']
+            else:
+                raise exception.SolidFireAPIException(msg)
+        else:
+            sf_volume_id = data['result']['volumeID']
 
         model_update = self._get_model_info(sfaccount, sf_volume_id)
         if model_update is None:
             mesg = _('Failed to get model update from clone')
             raise exception.SolidFireAPIException(mesg)
 
-        # Increment the usage count, just for data collection
+        # Update the attribute data-colection values on the source
         cloned_count = sf_vol['attributes'].get('cloned_count', 0)
         cloned_count += 1
         attributes = sf_vol['attributes']
@@ -778,6 +795,11 @@ class SolidFireDriver(san.SanISCSIDriver):
             if 'result' not in data:
                 msg = _("Failed to delete SolidFire Volume: %s") % data
                 raise exception.SolidFireAPIException(msg)
+            if self.configuration.get('purge_on_delete'):
+                LOG.info(_LI("Purge on delete is set, purging volume "
+                             "id: %s") % volume['id'])
+                params = {'volumeID': sf_vol['volumeID']}
+                self._issue_api_request('PurgeDeletedVolume', params)
         else:
             LOG.error(_LE("Volume ID %s was not found on "
                           "the SolidFire Cluster while attempting "
@@ -907,6 +929,28 @@ class SolidFireDriver(san.SanISCSIDriver):
             results['deDuplicationPercent']
         data['thin_provision_percent'] =\
             results['thinProvisioningPercent']
+
+        # NOTE(jdg): Get some additional info here using a newer version of the
+        # call
+        additional_results = self._issue_api_request('GetClusterCapacity',
+                                                     params,
+                                                     version="7.0")
+        if 'result' not in additional_results:
+            LOG.error(_LE('Failed to get updated stats'))
+        additional_results = additional_results['result']['clusterCapacity']
+
+        data['usedMetadataSpace'] = \
+            additional_results['usedMetadataSpace']
+        data['maxUsedMetadataSpace'] = \
+            additional_results['maxUsedMetadataSpace']
+
+        max_meta = ((self.configuration.get('max_metadata_percentage') * .01)
+                    * data['maxUsedMetadataSpace'])
+        if float(data['usedMetadataSpace']) > float(max_meta):
+            LOG.warning("Max metadata usage detected, dissallowing new volume "
+                        "creation by setting free_capacity to zero.")
+            data['free_capacity_gb'] = 0
+
         self.cluster_stats = data
 
     def attach_volume(self, context, volume,
