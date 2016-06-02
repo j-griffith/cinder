@@ -3433,3 +3433,48 @@ class VolumeManager(manager.SchedulerDependentManager):
     def secure_file_operations_enabled(self, ctxt, volume):
         secure_enabled = self.driver.secure_file_operations_enabled()
         return secure_enabled
+
+    def connect_volume(self, ctxt, volume, connector, host_info):
+        # TODO(jdg): For now we're being lazy and just wrapping up
+        # existing calls, in the future might be good to customize
+        # these a bit.  In either case this abstracts the implementation
+        # from the caller a bit so we can make changes without a fuss if
+        # we need/like
+        init_results = self.initialize_connection(context,
+                                                  volume['id'],
+                                                  connector)
+        # NOTE(jdg): We're requiring instance_uuid, host_name etc, no longer
+        # optional args, we should have everything necessary here still
+        attach_results = self.attach_volume(context,
+                                            volume['id'],
+                                            host_info['instance_uuid'],
+                                            host_info['host_name'],
+                                            host_info['mountpoint'],
+                                            host_info['mode'])
+        # TODO(jdg): We're using some nice and easy PODS here BUT we need to
+        # make sure we clearly define them and avoid ambiguity.  At least in
+        # terms of defining what the min required keys are
+        return {'connection_info': init_results,
+                'attach_id': attach_results['id']}
+
+    def _check_for_shared_connections(self, ctxt, volume, connector,
+                                      attachment_id):
+        pass
+
+    def disconnect_volume(self, ctxt, volume, connector, attachment_id,
+                          force=False):
+        connector['attachment'] = self.db.get_volume_attachment(ctxt,
+                                                                attachment_id)
+        utils.require_driver_initialized(self.driver)
+        try:
+            self.driver.terminate_connection(volume, connector,
+                                             force=force)
+        except Exception as err:
+            err_msg = (_('Terminate volume connection failed: %(err)s')
+                       % {'err': six.text_type(err)})
+            LOG.error(err_msg, resource=volume_ref)
+            raise exception.VolumeBackendAPIException(data=err_msg)
+        self.detach_volume(context, volume['id'], attachment_id=attachment_id)
+
+    def update_attachment_record(self, ctxt, attachment_id, updates):
+        pass

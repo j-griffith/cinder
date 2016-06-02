@@ -296,3 +296,8 @@ class VolumeAPI(rpc.RPCAPI):
         cctxt = self._get_cctxt(volume.host, '2.0')
         return cctxt.call(ctxt, 'secure_file_operations_enabled',
                           volume=volume)
+
+    def connect_volume(self, ctxt, volume, connector, host_info):
+        cctxt = self._get_cctxt(volume.host, '2.1')
+        return cctxt.call(ctxt, 'connect_volume', volume=volume,
+                          connector=connector, host_info=host_info)

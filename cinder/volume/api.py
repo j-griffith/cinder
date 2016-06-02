@@ -1774,6 +1774,42 @@ class API(base.Base):
             else:
                 return bool(val)
 
+    @wrap_check_policy
+    def connect_volume(self, context, volume, connector,
+                       instance_uuid, host_name, mountpoint,
+                       mode):
+        expected = {'multiattach': volume.multiattach,
+                    'status': (('available', 'in-use') if volume.multiattach
+                               else 'available')}
+        result = volume.conditional_update({'status': 'attaching'}, expected)
+        if not result:
+            expected_status = utils.build_or_str(expected['status'])
+            msg = _('Volume status must be %s to reserve.') % expected_status
+            LOG.error(msg)
+            raise exception.InvalidVolume(reason=msg)
+        LOG.info(_LI("Reserved volume for connection."),
+                 resource=volume)
+        host_info = {'host_name': host_name,
+                     'mountpoint': mountpoint,
+                     'mode': mode}
+        connect_results = self.volume_rpcapi.connect_volume(
+            context, volume, connector, host_info)
+        return connect_results
+
+    @wrap_check_policy
+    def disconnect_volume(self, context, volume, connector):
+        pass
+
+    @wrap_check_policy
+    def get_connection_count(self, context, volume, connector):
+        pass
+
+    @wrap_check_policy
+    def get_connection_info(self, context, volume, connector):
+        pass
+
+
+
 
 class HostAPI(base.Base):
     def __init__(self):

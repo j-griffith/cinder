@@ -42,6 +42,146 @@ class VolumeActionsController(wsgi.Controller):
         super(VolumeActionsController, self).__init__(*args, **kwargs)
         self.volume_api = volume.API()
 
+    @wsgi.action('os-connect')
+    def _connect(self, req, id, body):
+        """Connect a volume to caller and update status.
+
+        Provides the required information to connect the
+        specified volume resource to a host and sets the
+        volume's status to attached.  If something goes
+        wrong on the callers side, it's up to the caller
+        to remove the connection upon failure.
+
+        :param connector: os-brick connector object
+        :param instance_uuid: uuid of Instance being attached to
+        :param mountpoint: mountpoint inside of OpenStack Instance
+
+
+        connector object with:
+            host (required) - string
+            initiator - string
+            ip - string
+            platform - string
+            os_type - string
+            multipath - bool
+
+        returns connection info:
+            attachment_id - UUID
+            volume_id - UUID
+            auth_password - string
+            target_discovered - bool
+            encrypted - bool
+            qos_specs - dict
+            target_iqn - string
+            target_portal - string
+            target_lun - int
+            acess_mode - string
+            auth_username - string
+            auth_method - string
+            driver_volume_type - string
+        """
+        context = req.environ['cinder.context']
+        try:
+            volume = self.volume_api.get(context, id)
+        except exception.VolumeNotFound as error:
+            raise webob.exc.HTTPNotFound(explanation=error.msg)
+        connector = body['os-connect'].get('connector', None)
+
+        # NOTE(jdg): Consider moving these into the connector object
+        # seems like it would make sense
+        instance_uuid = body['os-connect'].get('instance_uuid', None)
+        mountpoint = body['os-connect'].get('mountpoint', None)
+        mode = body['os-connect'].get('mode', 'rw')
+
+        missing_params = []
+        if not connector:
+            missing_params.append('connector')
+        if not instance_uuid:
+            missing_params.append('instance_uuid')
+        if not mountpoint:
+            missing_params.append('mountpoint')
+        try:
+            info = self.volume_api.connect_volume(context,
+                                                  volume,
+                                                  connector,
+                                                  instance_uuid,
+                                                  mountpoint,
+                                                  mode)
+        except exception.InvalidInput as err:
+            raise webob.exc.HTTPBadRequest(
+                explanation=err)
+        except exception.VolumeBackendAPIException as error:
+            msg = _("Error during connection on backend.")
+            raise webob.exc.HTTPInternalServerError(explanation=msg)
+        return {'connection_info': info}
+
+    @wsgi.action('os-disconnect')
+    def _disconnect(self, req, id, body):
+        """Disconnect a volume and update status.
+
+        Informs the backend that the volume is to be disconnected
+        and updates the status and attachment tables appropriately.
+
+        :param attachment_id: UUID obtained from connect
+        """
+        context = req.environ['cinder.context']
+        try:
+            volume = self.volume_api.get(context, id)
+        except exception.VolumeNotFound as error:
+            raise webob.exc.HTTPNotFound(explanation=error.msg)
+        connector = body['os-connect'].get('connector', None)
+
+        # NOTE(jdg): Consider moving these into the connector object
+        # seems like it would make sense
+        instance_uuid = body['os-connect'].get('instance_uuid', None)
+        mountpoint = body['os-connect'].get('mountpoint', None)
+        mode = body['os-connect'].get('mode', 'rw')
+
+        missing_params = []
+        if not connector:
+            missing_params.append('connector')
+        if not instance_uuid:
+            missing_params.append('instance_uuid')
+        if not mountpoint:
+            missing_params.append('mountpoint')
+        try:
+            info = self.volume_api.disconnect_volume(context,
+                                                     volume,
+                                                     connector,
+                                                     instance_uuid,
+                                                     mountpoint,
+                                                     mode)
+        except exception.InvalidInput as err:
+            raise webob.exc.HTTPBadRequest(
+                explanation=err)
+        except exception.VolumeBackendAPIException as error:
+            msg = _("Error during connection on backend.")
+            raise webob.exc.HTTPInternalServerError(explanation=msg)
+        return {'connection_info': info}
+
+
+    @wsgi.action('os-get_connection_count')
+    def _get_connection_count(self, req, id, body):
+        """Disconnect a volume and update status.
+
+        Informs the backend that the volume is to be disconnected
+        and updates the status and attachment tables appropriately.
+
+        :param attachment_id: UUID obtained from connect
+        """
+        pass
+
+    @wsgi.action('os-get_connection_info')
+    def _get_connection_count(self, req, id, body):
+        """Disconnect a volume and update status.
+
+        Informs the backend that the volume is to be disconnected
+        and updates the status and attachment tables appropriately.
+
+        :param attachment_id: UUID obtained from connect
+        """
+        pass
+
     @wsgi.action('os-attach')
     def _attach(self, req, id, body):
         """Add attachment metadata."""
