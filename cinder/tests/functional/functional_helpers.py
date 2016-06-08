@@ -167,3 +167,19 @@ class _FunctionalTestBase(test.TestCase):
 
             time.sleep(1)
             retries += 1
+
+
+class _V3FunctionalTestBase(_FunctionalTestBase):
+    def setUp(self):
+        super(_V3FunctionalTestBase, self).setUp()
+
+    def _start_api_service(self):
+        default_conf = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', '..',
+            'etc/cinder/api-paste.ini'))
+        CONF.api_paste_config = default_conf
+        self.osapi = service.WSGIService("osapi_volume")
+        self.osapi.start()
+        # FIXME(ja): this is not the auth url - this is the service url
+        # FIXME(ja): this needs fixed in nova as well
+        self.auth_url = 'http://%s:%s/v3' % (self.osapi.host, self.osapi.port)

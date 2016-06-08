@@ -1228,3 +1228,8 @@ class SynoAuthError(CinderException):
 
 class SynoLUNNotExist(CinderException):
     message = _("LUN not found by UUID: %(uuid)s.")
+
+
+class AttachmentSpecsNotFound(NotFound):
+    message = _("Attachment %(attachment_id)s has no specs with "
+                "key %(attachment_specs_key)s.")

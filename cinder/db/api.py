@@ -1340,6 +1340,32 @@ def worker_destroy(context, **filters):
 ###################
 
 
+def attach_specs_get(context, attachment_id):
+    """Get all specs for an attachment."""
+    return IMPL.attach_specs_get(context, attachment_id)
+
+
+def attach_specs_delete(context, attachment_id, key):
+    """Delete the given attachment specs item."""
+    return IMPL.attach_specs_delete(context, attachment_id, key)
+
+
+def attach_specs_update_or_create(context,
+                                  attachment_id,
+                                  specs):
+    """Create or update attachment specs.
+
+    This adds or modifies the key/value pairs specified in the attachment
+    specs dict argument.
+    """
+    return IMPL.attachment_specs_update_or_create(context,
+                                                  attachment_id,
+                                                  specs)
+
+
+####################
+
+
 def resource_exists(context, model, resource_id):
     return IMPL.resource_exists(context, model, resource_id)
 

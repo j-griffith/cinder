@@ -98,14 +98,15 @@ class VolumeAPI(rpc.RPCAPI):
         methods in 1.x after that point should be done so that they can handle
         the version_cap being set to 1.40.
 
-        2.0  - Remove 1.x compatibility
-        2.1  - Add get_manageable_volumes() and get_manageable_snapshots().
+        2.0 - Remove 1.x compatibility
+        2.1 - Add get_manageable_volumes() and get_manageable_snapshots().
         2.2 - Adds support for sending objects over RPC in manage_existing().
-        2.3  - Adds support for sending objects over RPC in
+        2.3 - Adds support for sending objects over RPC in
                initialize_connection().
+        2.4 - Add new create/remove attachment calls
     """
 
-    RPC_API_VERSION = '2.3'
+    RPC_API_VERSION = '2.4'
     TOPIC = CONF.volume_topic
     BINARY = 'cinder-volume'
 
@@ -333,3 +334,22 @@ class VolumeAPI(rpc.RPCAPI):
         return cctxt.call(ctxt, 'get_manageable_snapshots', marker=marker,
                           limit=limit, offset=offset, sort_keys=sort_keys,
                           sort_dirs=sort_dirs)
+
+    def create_attachment(self, ctxt, volume, connector, instance_uuid,
+                          mountpoint, no_connect):
+        cctxt = self._get_cctxt(volume['host'], '2.4')
+        return cctxt.call(ctxt, 'create_attachment',
+                          volume_id=volume['id'],
+                          connector=connector,
+                          instance_uuid=instance_uuid,
+                          mountpoint=mountpoint,
+                          no_connect=no_connect)
+
+    def remove_attachment(self, ctxt, volume, connector, instance_uuid,
+                          mountpoint):
+        cctxt = self._get_cctxt(volume['host'], '2.4')
+        return cctxt.call(ctxt, 'remove_attachment',
+                          volume_id=volume['id'],
+                          connector=connector,
+                          instance_uuid=instance_uuid,
+                          mountpoint=mountpoint)

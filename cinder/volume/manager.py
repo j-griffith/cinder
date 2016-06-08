@@ -3452,3 +3452,50 @@ class VolumeManager(manager.SchedulerDependentManager):
     def secure_file_operations_enabled(self, ctxt, volume):
         secure_enabled = self.driver.secure_file_operations_enabled()
         return secure_enabled
+
+    def create_attachment(self, context, volume_id, connector, instance_uuid,
+                          mountpoint, no_connect=False):
+        results = {'data': {}}
+        if no_connect:
+            results['data']['access_mode'] = 'shelved'
+        else:
+            results = self.initialize_connection(context,
+                                                 volume_id,
+                                                 connector)
+        attach_results = self.attach_volume(context,
+                                            volume_id,
+                                            instance_uuid,
+                                            connector['host'],
+                                            mountpoint,
+                                            results['data']['access_mode'])
+        results['attachment_id'] = attach_results['id']
+        return results
+
+    def remove_attachment(self, context, volume_id, connector, instance_uuid,
+                          mountpoint):
+        self.terminate_connection(context, volume_id, connector, force=False)
+        attachments = self.db.volume_attachment_get_all_by_volume_id(
+            context, volume_id)
+
+        active_attachment = None
+        for attachment in attachments:
+            if attachment['instance_uuid'] == instance_uuid:
+                active_attachment = attachment
+
+        if not active_attachment:
+            LOG.error(_LE("Failed to find attachment record for volume on"
+                          "%(host)s for instance %(instance)s") %
+                      {"host": connector['host'],
+                       "instance": instance_uuid},
+                      resource={'type': 'volume',
+                                'id': volume_id})
+            raise exception.VolumeAttachmentNotFound()
+        else:
+            self.detach_volume(context,
+                               volume_id,
+                               attachment_id=active_attachment['id'])
+        attachments = self.db.volume_attachment_get_all_by_volume_id(
+            context, volume_id)
+        # Return a list of remaining attachments so caller can determine if
+        # it's safe to delete devices etc
+        return attachments

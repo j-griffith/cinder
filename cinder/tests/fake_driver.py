@@ -24,7 +24,8 @@ from cinder.zonemanager import utils as fczm_utils
 
 
 class FakeISCSIDriver(lvm.LVMVolumeDriver):
-    """Logs calls instead of executing."""
+    """Fake iSCSI driver."""
+
     def __init__(self, *args, **kwargs):
         super(FakeISCSIDriver, self).__init__(execute=self.fake_execute,
                                               *args, **kwargs)
@@ -87,6 +88,15 @@ class FakeISCSIDriver(lvm.LVMVolumeDriver):
     def fake_execute(cmd, *_args, **_kwargs):
         """Execute that simply logs the command."""
         return (None, None)
+
+    def get_volume_stats(self, refresh=False):
+        return {
+            'volume_backend_name': self.configuration.safe_get(
+                'volume_backend_name'),
+            'vendor_name': 'FakeISCSIDriver',
+            'total_capacity_gb': 'infinite',
+            'free_capacity_gb': 'infinite',
+        }
 
 
 class FakeISERDriver(FakeISCSIDriver):
@@ -159,7 +169,7 @@ class LoggingVolumeDriver(driver.VolumeDriver):
     def ensure_export(self, context, volume):
         self.log_action('ensure_export', volume)
 
-    def create_export(self, context, volume):
+    def create_export(self, context, volume, connector):
         self.log_action('create_export', volume)
 
     def remove_export(self, context, volume):
@@ -167,6 +177,8 @@ class LoggingVolumeDriver(driver.VolumeDriver):
 
     def initialize_connection(self, volume, connector):
         self.log_action('initialize_connection', volume)
+        return {'driver_volume_type': 'FakeLogging',
+                'data': {'access_mode': 'rw'}}
 
     def terminate_connection(self, volume, connector):
         self.log_action('terminate_connection', volume)

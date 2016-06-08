@@ -5090,6 +5090,80 @@ def worker_destroy(context, **filters):
 
 ###############################
 
+def _attachment_specs_query(context, attachment_id, session=None):
+    return model_query(context, models.AttachmentSpecs, session=session,
+                       read_deleted="no").\
+        filter_by(attachment_id=attachment_id)
+
+
+@require_context
+def attachment_specs_get(context, attachment_id):
+    rows = _attachment_specs_query(context, attachment_id).\
+        all()
+
+    result = {}
+    for row in rows:
+        result[row['key']] = row['value']
+
+    return result
+
+
+@require_context
+def attachment_specs_delete(context, attachment_id, key):
+    session = get_session()
+    with session.begin():
+        _attachment_specs_get_item(context,
+                                   attachment_id,
+                                   key,
+                                   session)
+        _attachment_specs_query(context, attachment_id, session).\
+            filter_by(key=key).\
+            update({'deleted': True,
+                    'deleted_at': timeutils.utcnow(),
+                    'updated_at': literal_column('updated_at')})
+
+
+@require_context
+def _attachment_specs_get_item(context,
+                               attachment_id,
+                               key,
+                               session=None):
+    result = _attachment_specs_query(
+        context, attachment_id, session=session).\
+        filter_by(key=key).\
+        first()
+
+    if not result:
+        raise exception.AttachmentSpecsNotFound(
+            attachment_specs_key=key,
+            attachment_id=attachment_id)
+
+    return result
+
+
+@handle_db_data_error
+@require_context
+def attachment_specs_update_or_create(context,
+                                      attachment_id,
+                                      specs):
+    session = get_session()
+    with session.begin():
+        spec_ref = None
+        for key, value in specs.items():
+            try:
+                spec_ref = _attachment_specs_get_item(
+                    context, attachment_id, key, session)
+            except exception.AttachmentSpecsNotFound:
+                spec_ref = models.AttachmentSpecs()
+            spec_ref.update({"key": key, "value": value,
+                             "attachment_id": attachment_id,
+                             "deleted": False})
+            spec_ref.save(session=session)
+
+        return specs
+
+
+####################
 
 @require_context
 def resource_exists(context, model, resource_id):

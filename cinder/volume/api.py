@@ -652,11 +652,11 @@ class API(base.Base):
                          'because it is in maintenance.'), resource=volume)
             msg = _("The volume cannot be detached in maintenance mode.")
             raise exception.InvalidVolume(reason=msg)
-        detach_results = self.volume_rpcapi.detach_volume(context, volume,
-                                                          attachment_id)
+        self.volume_rpcapi.detach_volume(context,
+                                         volume,
+                                         attachment_id)
         LOG.info(_LI("Detach volume completed successfully."),
                  resource=volume)
-        return detach_results
 
     @wrap_check_policy
     def initialize_connection(self, context, volume, connector):
@@ -682,6 +682,8 @@ class API(base.Base):
                                                 force)
         LOG.info(_LI("Terminate volume connection completed successfully."),
                  resource=volume)
+        # BUG(jdg): This should be issued by the caller prior to the terminate
+        # call, this is a source of race conditions in the detach process
         self.unreserve_volume(context, volume)
 
     @wrap_check_policy
@@ -1685,6 +1687,62 @@ class API(base.Base):
                 return True
             else:
                 return bool(val)
+
+    @wrap_check_policy
+    def create_attachment(self, context, volume_ref, connector, instance_uuid,
+                          mountpoint, no_connect=False):
+        if volume_ref['status'] == 'maintenance':
+            LOG.info(_LI('Unable to create attachment for '
+                         'volume because it is in '
+                         'maintenance.'), resource=volume_ref)
+            msg = _("Unable to create attachment for volume "
+                    "while it is in maintenance mode.")
+            raise exception.InvalidVolume(reason=msg)
+        attach_results = self.volume_rpcapi.create_attachment(
+            context,
+            volume_ref,
+            connector,
+            instance_uuid,
+            mountpoint,
+            no_connect=no_connect)
+        LOG.info(_LI("Create volume attachment completed successfully."),
+                 resource=volume_ref)
+        return attach_results
+
+    @wrap_check_policy
+    def remove_attachment(self, context, volume_ref, connector, instance_uuid,
+                          mountpoint):
+        if volume_ref['status'] == 'maintenance':
+            LOG.info(_LI('Unable to remove attachment for '
+                         'volume because it is in '
+                         'maintenance.'), resource=volume_ref)
+            msg = _("Unable to remove attachment for volume "
+                    "while it is in maintenance mode.")
+            raise exception.InvalidVolume(reason=msg)
+        remaining_attachments = self.volume_rpcapi.remove_attachment(
+            context,
+            volume_ref,
+            connector,
+            instance_uuid,
+            mountpoint)
+        LOG.info(_LI("Remove volume attachment completed successfully."),
+                 resource=volume_ref)
+        # Returns the remaining attachments (if any) for the specified volume
+        return remaining_attachments
+
+    @wrap_check_policy
+    def get_attachments_by_volume(self, context, volume_ref, host_filter=None):
+        if not host_filter:
+            return self.db.volume_attachment_get_all_by_volume_id(
+                context, volume_ref['id'])
+        else:
+            return self.db.volume_attachment_get_all_by_host(context,
+                                                             volume_ref['id'],
+                                                             host_filter)
+
+    @wrap_check_policy
+    def get_attachment(self, context, attachment_id):
+        return self.db.volume_attachment_get(context, attachment_id)
 
 
 class HostAPI(base.Base):

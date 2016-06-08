@@ -27,6 +27,10 @@
     "volume:retype": "rule:admin_or_owner",
     "volume:update": "rule:admin_or_owner",
 
+    "volume_extension:volume_actions:create_attachment": "rule:admin_api",
+    "volume_extension:volume_actions:remove_attachment": "rule:admin_api",
+    "volume_extension:volume_actions:list_attachments": "rule:admin_api",
+
     "volume_extension:types_manage": "rule:admin_api",
     "volume_extension:types_extra_specs": "rule:admin_api",
     "volume_extension:access_types_qos_specs_id": "rule:admin_api",

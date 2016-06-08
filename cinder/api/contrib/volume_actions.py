@@ -355,6 +355,161 @@ class VolumeActionsController(wsgi.Controller):
         self.volume_api.update(context, volume, update_dict)
         return webob.Response(status_int=200)
 
+    @wsgi.action('os-create_attachment')
+    def _create_attachment(self, req, id, body):
+        """Create a volume attachment.
+
+        :param connector: os-brick connector object
+            host (required) - string
+            initiator - string
+            ip - string
+            platform - string
+            os_type - string
+            multipath - bool
+        :param instance_uuid: instance being detached from
+        :param mountpoint: mountpoint volume is mounted on Instance
+        :returns connection_info object:
+            attachment_id - UUID
+            volume_id - UUID
+            auth_password - string
+            target_discovered - bool
+            encrypted - bool
+            qos_specs - dict
+            target_iqn - string
+            target_portal - string
+            target_lun - int
+            acess_mode - string
+            auth_username - string
+            auth_method - string
+            driver_volume_type - string
+        """
+        context = req.environ['cinder.context']
+        try:
+            volume = self.volume_api.get(context, id)
+        except exception.VolumeNotFound as error:
+            raise webob.exc.HTTPNotFound(explanation=error.msg)
+
+        try:
+            no_connect = body['os-create_attachment']['no_connect']
+        except KeyError:
+            no_connect = False
+
+        try:
+            connector = body['os-create_attachment']['connector']
+        except KeyError:
+            if not no_connect:
+                raise webob.exc.HTTPBadRequest(
+                    explanation=_("Must specify 'connector' unless "
+                                  "no_connect is specified"))
+
+        try:
+            instance_uuid = body['os-create_attachment']['instance_uuid']
+        except KeyError:
+            raise webob.exc.HTTPBadRequest(
+                explanation=_("Must specify 'instance_uuid'"))
+        try:
+            mountpoint = body['os-create_attachment']['mountpoint']
+        except KeyError:
+            raise webob.exc.HTTPBadRequest(
+                explanation=_("Must specify 'mountpoint'"))
+
+        try:
+            connection_info = self.volume_api.create_attachment(
+                context,
+                volume,
+                connector,
+                instance_uuid,
+                mountpoint,
+                no_connect)
+        except exception.InvalidInput as err:
+            raise webob.exc.HTTPBadRequest(
+                explanation=err)
+        except exception.VolumeBackendAPIException as error:
+            msg = _("Unable to fetch connection information from backend.")
+            raise webob.exc.HTTPInternalServerError(explanation=msg)
+        return {'connection_info': connection_info}
+
+    @wsgi.action('os-remove_attachment')
+    def _remove_attachment(self, req, id, body):
+        """Remove a volume attachment.
+
+        :param connector: os-brick connector object
+        :param instance_uuid: instance being detached from
+        :param mountpoint: mountpoint volume is mounted on Instance
+
+        returns: a list of remaining attachment records for this volume
+        """
+
+        # NOTE(jdg): Ideally we'd have everything in the connector object, and
+        # we *almost* do, but the one key that's missing is the instance-uuid
+        # that we're attached to.  If that was there we could just handle
+        # multi-attach via the connector, but alas... we can't do that
+        context = req.environ['cinder.context']
+        try:
+            volume = self.volume_api.get(context, id)
+        except exception.VolumeNotFound as error:
+            raise webob.exc.HTTPNotFound(explanation=error.msg)
+        try:
+            connector = body['os-remove_attachment']['connector']
+        except KeyError:
+            raise webob.exc.HTTPBadRequest(
+                explanation=_("Must specify 'connector'"))
+
+        try:
+            instance_uuid = body['os-remove_attachment']['instance_uuid']
+        except KeyError:
+            raise webob.exc.HTTPBadRequest(
+                explanation=_("Must specify 'instance_uuid'"))
+
+        # NOTE(jdg): We have mountpoint just incase some knuckle-head wants to
+        # attach the same volume to the same instance multiple times.  I don't
+        # see a good reason to allow this, but we either need to explicitly
+        # reject it or we need to support it
+        try:
+            mountpoint = body['os-remove_attachment']['mountpoint']
+        except KeyError:
+            raise webob.exc.HTTPBadRequest(
+                explanation=_("Must specify 'mountpoint'"))
+        try:
+            attachments = self.volume_api.remove_attachment(context,
+                                                            volume,
+                                                            connector,
+                                                            instance_uuid,
+                                                            mountpoint)
+        except exception.InvalidInput as err:
+            raise webob.exc.HTTPBadRequest(
+                explanation=err)
+        except exception.VolumeBackendAPIException as error:
+            msg = _("Unable to fetch connection information from backend.")
+            raise webob.exc.HTTPInternalServerError(explanation=msg)
+
+        # NOTE(jdg): This can be used on the callers side to determine if that
+        # can/should delete all connections on their side.  For example delete
+        # the /dev/disk-by-path entry
+        resp = {}
+        resp['attachments'] = attachments
+        return resp
+
+    @wsgi.action('os-list_attachments')
+    def _list_attachments(self, req, id, body):
+        """Get a list of active volume attachments.
+
+        params: host: optional filter on attached_host column
+        returns: a list of active attachment records for this volume
+        """
+        context = req.environ['cinder.context']
+        try:
+            volume = self.volume_api.get(context, id)
+        except exception.VolumeNotFound as error:
+            raise webob.exc.HTTPNotFound(explanation=error.msg)
+        attachments = self.volume_api.get_attachments_by_volume(
+            context,
+            volume,
+            host_filter=None)
+        resp = {}
+        resp['attachments'] = attachments
+        return resp
+
 
 class Volume_actions(extensions.ExtensionDescriptor):
     """Enable volume actions."""

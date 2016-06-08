@@ -1,0 +1,293 @@
+diff --git a/cinder/api/contrib/volume_actions.py b/cinder/api/contrib/volume_actions.py
+index f215a41..7f28dd2 100644
+--- a/cinder/api/contrib/volume_actions.py
++++ b/cinder/api/contrib/volume_actions.py
+@@ -388,11 +388,19 @@ class VolumeActionsController(wsgi.Controller):
+             volume = self.volume_api.get(context, id)
+         except exception.VolumeNotFound as error:
+             raise webob.exc.HTTPNotFound(explanation=error.msg)
++
++        try:
++            no_connect = body['os-create_attachment']['no_connect']
++        except KeyError:
++            no_connect = False
++
+         try:
+             connector = body['os-create_attachment']['connector']
+         except KeyError:
+-            raise webob.exc.HTTPBadRequest(
+-                explanation=_("Must specify 'connector'"))
++            if not no_connect:
++                raise webob.exc.HTTPBadRequest(
++                    explanation=_("Must specify 'connector' unless "
++                                  "no_connect is specified"))
+ 
+         try:
+             instance_uuid = body['os-create_attachment']['instance_uuid']
+@@ -404,13 +412,15 @@ class VolumeActionsController(wsgi.Controller):
+         except KeyError:
+             raise webob.exc.HTTPBadRequest(
+                 explanation=_("Must specify 'mountpoint'"))
++
+         try:
+             connection_info = self.volume_api.create_attachment(
+                 context,
+                 volume,
+                 connector,
+                 instance_uuid,
+-                mountpoint)
++                mountpoint,
++                no_connect)
+         except exception.InvalidInput as err:
+             raise webob.exc.HTTPBadRequest(
+                 explanation=err)
+diff --git a/cinder/db/api.py b/cinder/db/api.py
+index 53c9a0e..910dc8e 100644
+--- a/cinder/db/api.py
++++ b/cinder/db/api.py
+@@ -1340,6 +1340,32 @@ def worker_destroy(context, **filters):
+ ###################
+ 
+ 
++def attach_specs_get(context, attachment_id):
++    """Get all specs for an attachment."""
++    return IMPL.attach_specs_get(context, attachment_id)
++
++
++def attach_specs_delete(context, attachment_id, key):
++    """Delete the given attachment specs item."""
++    return IMPL.attach_specs_delete(context, attachment_id, key)
++
++
++def attach_specs_update_or_create(context,
++                                  attachment_id,
++                                  specs):
++    """Create or update attachment specs.
++
++    This adds or modifies the key/value pairs specified in the attachment
++    specs dict argument.
++    """
++    return IMPL.attachment_specs_update_or_create(context,
++                                                  attachment_id,
++                                                  specs)
++
++
++####################
++
++
+ def resource_exists(context, model, resource_id):
+     return IMPL.resource_exists(context, model, resource_id)
+ 
+diff --git a/cinder/db/sqlalchemy/api.py b/cinder/db/sqlalchemy/api.py
+index 502b79d..30585bb 100644
+--- a/cinder/db/sqlalchemy/api.py
++++ b/cinder/db/sqlalchemy/api.py
+@@ -5090,6 +5090,80 @@ def worker_destroy(context, **filters):
+ 
+ ###############################
+ 
++def _attachment_specs_query(context, attachment_id, session=None):
++    return model_query(context, models.AttachmentSpecs, session=session,
++                       read_deleted="no").\
++        filter_by(attachment_id=attachment_id)
++
++
++@require_context
++def attachment_specs_get(context, attachment_id):
++    rows = _attachment_specs_query(context, attachment_id).\
++        all()
++
++    result = {}
++    for row in rows:
++        result[row['key']] = row['value']
++
++    return result
++
++
++@require_context
++def attachment_specs_delete(context, attachment_id, key):
++    session = get_session()
++    with session.begin():
++        _attachment_specs_get_item(context,
++                                   attachment_id,
++                                   key,
++                                   session)
++        _attachment_specs_query(context, attachment_id, session).\
++            filter_by(key=key).\
++            update({'deleted': True,
++                    'deleted_at': timeutils.utcnow(),
++                    'updated_at': literal_column('updated_at')})
++
++
++@require_context
++def _attachment_specs_get_item(context,
++                               attachment_id,
++                               key,
++                               session=None):
++    result = _attachment_specs_query(
++        context, attachment_id, session=session).\
++        filter_by(key=key).\
++        first()
++
++    if not result:
++        raise exception.AttachmentSpecsNotFound(
++            attachment_specs_key=key,
++            attachment_id=attachment_id)
++
++    return result
++
++
++@handle_db_data_error
++@require_context
++def attachment_specs_update_or_create(context,
++                                      attachment_id,
++                                      specs):
++    session = get_session()
++    with session.begin():
++        spec_ref = None
++        for key, value in specs.items():
++            try:
++                spec_ref = _attachment_specs_get_item(
++                    context, attachment_id, key, session)
++            except exception.AttachmentSpecsNotFound:
++                spec_ref = models.AttachmentSpecs()
++            spec_ref.update({"key": key, "value": value,
++                             "attachment_id": attachment_id,
++                             "deleted": False})
++            spec_ref.save(session=session)
++
++        return specs
++
++
++####################
+ 
+ @require_context
+ def resource_exists(context, model, resource_id):
+diff --git a/cinder/db/sqlalchemy/models.py b/cinder/db/sqlalchemy/models.py
+index bb28b97..6dd3191 100644
+--- a/cinder/db/sqlalchemy/models.py
++++ b/cinder/db/sqlalchemy/models.py
+@@ -737,6 +737,26 @@ class Worker(BASE, CinderBase):
+         primaryjoin='Worker.service_id == Service.id')
+ 
+ 
++class AttachmentSpecs(BASE, CinderBase):
++    """Represents attachment specs as k/v pairs for a volume_attachment."""
++    __tablename__ = 'attachment_specs'
++    id = Column(Integer, primary_key=True)
++    key = Column(String(255))
++    value = Column(String(255))
++    attachment_id = (
++        Column(String(36),
++               ForeignKey('volume_attachment.id'),
++               nullable=False))
++    volume_attachment = relationship(
++        VolumeAttachment,
++        backref="attachment_specs",
++        foreign_keys=attachment_id,
++        primaryjoin='and_('
++        'AttachmentSpecs.attachment_id == VolumeAttachment.id,'
++        'AttachmentSpecs.deleted == False)'
++    )
++
++
+ def register_models():
+     """Register Models and create metadata.
+ 
+@@ -760,6 +780,7 @@ def register_models():
+               Cgsnapshot,
+               Cluster,
+               Worker,
++              AttachmentSpecs,
+               )
+     engine = create_engine(CONF.database.connection, echo=False)
+     for model in models:
+diff --git a/cinder/exception.py b/cinder/exception.py
+index 0987c90..3a49624 100644
+--- a/cinder/exception.py
++++ b/cinder/exception.py
+@@ -1228,3 +1228,8 @@ class SynoAuthError(CinderException):
+ 
+ class SynoLUNNotExist(CinderException):
+     message = _("LUN not found by UUID: %(uuid)s.")
++
++
++class AttachmentSpecsNotFound(NotFound):
++    message = _("Attachment %(attachment_id)s has no specs with "
++                "key %(attachment_specs_key)s.")
+diff --git a/cinder/volume/api.py b/cinder/volume/api.py
+index dc4c1f8..20d5732 100644
+--- a/cinder/volume/api.py
++++ b/cinder/volume/api.py
+@@ -1690,7 +1690,7 @@ class API(base.Base):
+ 
+     @wrap_check_policy
+     def create_attachment(self, context, volume_ref, connector, instance_uuid,
+-                          mountpoint):
++                          mountpoint, no_connect=False):
+         if volume_ref['status'] == 'maintenance':
+             LOG.info(_LI('Unable to create attachment for '
+                          'volume because it is in '
+@@ -1698,11 +1698,13 @@ class API(base.Base):
+             msg = _("Unable to create attachment for volume "
+                     "while it is in maintenance mode.")
+             raise exception.InvalidVolume(reason=msg)
+-        attach_results = self.volume_rpcapi.create_attachment(context,
+-                                                              volume_ref,
+-                                                              connector,
+-                                                              instance_uuid,
+-                                                              mountpoint)
++        attach_results = self.volume_rpcapi.create_attachment(
++            context,
++            volume_ref,
++            connector,
++            instance_uuid,
++            mountpoint,
++            no_connect=no_connect)
+         LOG.info(_LI("Create volume attachment completed successfully."),
+                  resource=volume_ref)
+         return attach_results
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index 902f9f4..bd110fa 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -3454,10 +3454,14 @@ class VolumeManager(manager.SchedulerDependentManager):
+         return secure_enabled
+ 
+     def create_attachment(self, context, volume_id, connector, instance_uuid,
+-                          mountpoint):
+-        results = self.initialize_connection(context,
+-                                             volume_id,
+-                                             connector)
++                          mountpoint, no_connect=False):
++        results = {'data': {}}
++        if no_connect:
++            results['data']['access_mode'] = 'shelved'
++        else:
++            results = self.initialize_connection(context,
++                                                 volume_id,
++                                                 connector)
+         attach_results = self.attach_volume(context,
+                                             volume_id,
+                                             instance_uuid,
+diff --git a/cinder/volume/rpcapi.py b/cinder/volume/rpcapi.py
+index 45f5708..af16c2c 100644
+--- a/cinder/volume/rpcapi.py
++++ b/cinder/volume/rpcapi.py
+@@ -336,13 +336,14 @@ class VolumeAPI(rpc.RPCAPI):
+                           sort_dirs=sort_dirs)
+ 
+     def create_attachment(self, ctxt, volume, connector, instance_uuid,
+-                          mountpoint):
++                          mountpoint, no_connect):
+         cctxt = self._get_cctxt(volume['host'], '2.4')
+         return cctxt.call(ctxt, 'create_attachment',
+                           volume_id=volume['id'],
+                           connector=connector,
+                           instance_uuid=instance_uuid,
+-                          mountpoint=mountpoint)
++                          mountpoint=mountpoint,
++                          no_connect=no_connect)
+ 
+     def remove_attachment(self, ctxt, volume, connector, instance_uuid,
+                           mountpoint):
