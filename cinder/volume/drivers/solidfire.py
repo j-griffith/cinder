@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import inspect
 import json
 import math
 import random
@@ -31,6 +32,7 @@ from cinder import context
 from cinder import exception
 from cinder.i18n import _, _LE, _LI, _LW
 from cinder.image import image_utils
+from cinder import utils
 from cinder.volume.drivers.san import san
 from cinder.volume import qos_specs
 from cinder.volume import volume_types
@@ -121,6 +123,7 @@ class SolidFireDriver(san.SanISCSIDriver):
     """
 
     VERSION = '2.0.0'
+    driver_prefix = 'solidfire'
 
     sf_qos_dict = {'slow': {'minIOPS': 100,
                             'maxIOPS': 200,
@@ -144,7 +147,9 @@ class SolidFireDriver(san.SanISCSIDriver):
                         'xMaxSnapshotsPerVolumeExceeded',
                         'xMaxClonesPerVolumeExceeded',
                         'xMaxSnapshotsPerNodeExceeded',
-                        'xMaxClonesPerNodeExceeded']
+                        'xMaxClonesPerNodeExceeded',
+                        'xSliceNotRegistered',
+                        'xNotReadyForIO']
 
     def __init__(self, *args, **kwargs):
         super(SolidFireDriver, self).__init__(*args, **kwargs)
@@ -634,6 +639,25 @@ class SolidFireDriver(san.SanISCSIDriver):
                 msg = _("Failed to create SolidFire Image-Volume")
                 raise exception.SolidFireAPIException(msg)
 
+    def locked_image_id_operation(f, external=False):
+        def lvo_inner1(inst, *args, **kwargs):
+            lock_tag = inst.driver_prefix
+            call_args = inspect.getcallargs(f, inst, *args, **kwargs)
+
+            if call_args.get('image_meta'):
+                image_id = call_args['image_meta']['id']
+            else:
+                err_msg = _('The decorated method must accept image_meta.')
+                raise exception.VolumeBackendAPIException(data=err_msg)
+
+            @utils.synchronized('%s-%s' % (lock_tag, image_id),
+                                external=external)
+            def lvo_inner2():
+                return f(inst, *args, **kwargs)
+            return lvo_inner2()
+        return lvo_inner1
+
+    @locked_image_id_operation
     def clone_image(self, context,
                     volume, image_location,
                     image_meta, image_service):
