@@ -16,6 +16,7 @@ build-stamp
 CA/
 ChangeLog
 cinder.egg-info
+contrib/block_box/db_data/*
 cover/*
 covhtml
 dist/*
