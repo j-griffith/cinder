@@ -25,6 +25,14 @@ This includes master, stable/xyz as well as patch versions.  Additional
 variables are provided and can be passed to make using the `-e` option to
 control things like naming and image tags.  See the Makefile for more info.
 
+WARNING Current versions of Docker don't provide a method to override the
+FROM directive (base image) in a Dockerfile.  This creates some problems if
+you try and specify an image tag of your own for the base image.  For now
+we're leaving out the option to specify your own tag but the next release
+of Docker should allow this and we'll provide the option then.  LOCI images
+should be built for not, and NOT pulled from dockerhub or registry until we
+have an automated test/build system in place.
+
 If you're going to utilize an external storage device (ie not using LVM), all
 you need to build is the base Cinder image.  Set the variable in the Makefile
 to choose the Cinder Branch you'd like to use and Platform then simply run:

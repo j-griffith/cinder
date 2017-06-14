@@ -22,7 +22,7 @@ services:
             - ./db-data:/var/lib/mysql
             - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
     cinder-api:
-        image: cinder
+        image: openstackloci/cinder:debian
         hostname: cinder-api
         volumes:
             - ./etc-cinder:/etc/cinder
@@ -39,7 +39,7 @@ services:
             - INIT_DB=true
         command: sh /init-scripts/cinder-api.sh
     cinder-scheduler:
-        image: cinder
+        image: openstackloci/cinder:debian
         hostname: cinder-scheduler
         volumes:
             - ./etc-cinder:/etc/cinder
@@ -56,7 +56,7 @@ services:
         restart: on-failure
         command: cinder-scheduler
     cinder-volume:
-        image: cinder-lvm
+        image: openstackloci/cinder-lvm:debian
         hostname: cinder-lvm
         privileged: true
         volumes:

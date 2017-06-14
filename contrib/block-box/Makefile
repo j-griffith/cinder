@@ -1,15 +1,14 @@
-CINDER_BRANCH ?= master # master, stable/ocata, refs/changes/67/418167/1
-NAME_PREFIX ?= ""
-PLATFORM ?= debian # ubuntu, centos
-TAG ?= latest
+CINDER_BRANCH ?= stable/ocata# master, stable/ocata, refs/changes/67/418167/1
+PLATFORM ?= debian# ubuntu, centos
 
 all: base lvm devbox
+blockbox: base lvm
 
 base:
-	docker build https://git.openstack.org/openstack/loci-cinder.git\#:$(PLATFORM) --tag cinder:$(TAG) --build-arg PROJECT_REF="stable/ocata"
+	docker build https://git.openstack.org/openstack/loci-cinder.git\#:$(PLATFORM) --tag openstackloci/cinder:$(PLATFORM) --build-arg PROJECT_REF=${CINDER_BRANCH}
 
 lvm:
-	docker build -t cinder-lvm -f ./docker_files/Dockerfile.cinder-lvm .
+	docker build https://git.openstack.org/openstack/loci-cinder.git\#:${PLATFORM}/lvm --tag openstackloci/cinder-lvm:$(PLATFORM) --build-arg PROJECT_REF=${CINDER_BRANCH}
 
 devbox:
 	cp ../../test-requirements.txt ./docker_files/
