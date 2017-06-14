@@ -1,7 +1,7 @@
 CINDER_BRANCH ?= stable/ocata# master, stable/ocata, refs/changes/67/418167/1
 PLATFORM ?= debian# ubuntu, centos
 
-all: base lvm devbox
+all: base lvm devbox keystone
 blockbox: base lvm
 
 base:
@@ -9,6 +9,9 @@ base:
 
 lvm:
 	docker build https://git.openstack.org/openstack/loci-cinder.git\#:${PLATFORM}/lvm --tag openstackloci/cinder-lvm:$(PLATFORM) --build-arg PROJECT_REF=${CINDER_BRANCH}
+
+keystone:
+	docker build https://git.openstack.org/openstack/loci-keystone.git\#:${PLATFORM} --tag openstackloci/keystone:$(PLATFORM) --build-arg PROJECT_REF=${KEYSTONE_BRANCH}
 
 devbox:
 	cp ../../test-requirements.txt ./docker_files/

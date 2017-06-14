@@ -21,6 +21,24 @@ services:
         volumes:
             - ./db-data:/var/lib/mysql
             - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+    keystone:
+        image: openstackloci/keystone:debian
+        hostname: keystone
+        volumes:
+            - ./etc-keystone:/etc/keystone
+            - ./init-scripts:/init-scripts
+        network_mode: "host"
+        ports:
+            - 5000:5000
+            - 35357:35357
+        depends_on:
+          - mariadb
+        extra_hosts:
+            - "rabbitmq:172.49.49.5"
+            - "mariadb:172.49.49.6"
+        environment:
+            - INIT_DB=true
+        command: sh /init-scripts/keystone-init.sh
     cinder-api:
         image: openstackloci/cinder:debian
         hostname: cinder-api
