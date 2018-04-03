@@ -22,6 +22,7 @@ from oslo_config import cfg
 from oslo_log import log as logging
 
 # Need to register global_opts
+from cinder import context as cinder_context
 from cinder.csi import csi_service
 from cinder import rpc
 from cinder import version
@@ -34,7 +35,8 @@ if __name__ == '__main__':
     objects.register_all()
     CONF(sys.argv[1:], project='cinder',
          version=version.version_string())
+    cctxt = cinder_context.RequestContext('admin', '711fd1ec1c8141cc860ed398ce163bf1')
     logging.setup(CONF, "cinder")
     python_logging.captureWarnings(True)
     rpc.init(CONF)
-    csi_service.serve()
+    csi_service.serve(cctxt)
